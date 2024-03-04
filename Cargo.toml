@@ -1,0 +1,10 @@
+[package]
+name = "oxidd-lite"
+version = "0.1.0"
+edition = "2021"
+description = "Stripped-down version of OxiDD as a playground for formal verification"
+license = "MIT OR Apache-2.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
