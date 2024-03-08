@@ -1,72 +1,45 @@
-use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::hash::Hasher;
-use std::rc::Rc;
 
 // spell-checker:ignore fnode,gnode
 
-#[derive(Clone, Debug)]
-pub enum Edge {
-    Terminal(bool),
-    Inner(Rc<Node>),
-}
-
-impl PartialEq for Edge {
-    fn eq(&self, other: &Self) -> bool {
-        use Edge::*;
-        match (self, other) {
-            (Terminal(l), Terminal(r)) => l == r,
-            (Inner(l), Inner(r)) => Rc::ptr_eq(l, r),
-            _ => false,
-        }
-    }
-}
-impl Eq for Edge {}
-
-impl PartialOrd for Edge {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Edge {
-    fn cmp(&self, other: &Self) -> Ordering {
-        use Edge::*;
-        match (self, other) {
-            (Terminal(l), Terminal(r)) => l.cmp(r),
-            (Terminal(_), Inner(_)) => Ordering::Less,
-            (Inner(_), Terminal(_)) => Ordering::Greater,
-            (Inner(l), Inner(r)) => Rc::as_ptr(l).cmp(&Rc::as_ptr(r)),
-        }
-    }
-}
-
-impl Hash for Edge {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            Edge::Terminal(v) => v.hash(state),
-            Edge::Inner(v) => Rc::as_ptr(v).hash(state),
-        }
-    }
-}
+// Note: We only need some arbitrary total ordering on `Edge`s. This avoids
+// having both f ∧ g and g ∧ f separately in the apply cache.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Edge(u32);
 
 impl Edge {
-    pub fn eval(&self, env: &[bool]) -> bool {
-        match self {
-            Edge::Terminal(b) => *b,
-            Edge::Inner(node) => if env[node.level as usize] {
-                &node.t
-            } else {
-                &node.e
-            }
-            .eval(env),
+    const NUM_TERMINALS: u32 = 2;
+
+    pub fn to_terminal(value: bool) -> Self {
+        Self(value as u32)
+    }
+
+    fn to_inner_node(index: u32) -> Self {
+        Self(index + Self::NUM_TERMINALS)
+    }
+
+    pub fn terminal_value(self) -> Option<bool> {
+        if self.0 == 0 {
+            Some(false)
+        } else if self.0 == 1 {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    fn inner_node_index(self) -> Option<u32> {
+        if self.0 >= 2 {
+            Some(self.0 - Self::NUM_TERMINALS)
+        } else {
+            None
         }
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Node {
     /// Level number, must be less than `t.level` and `e.level` (given that
     /// these point to inner nodes)
@@ -79,7 +52,8 @@ pub struct Node {
 
 #[derive(Default, Debug)]
 pub struct Manager {
-    unique_table: HashMap<Node, Rc<Node>>,
+    node_store: Vec<Node>,
+    unique_table: HashMap<Node, Edge>,
     apply_not_cache: HashMap<Edge, Edge>,
     apply_and_cache: HashMap<(Edge, Edge), Edge>,
 }
@@ -89,56 +63,76 @@ impl Manager {
         Self::default()
     }
 
+    /// Panics if self points to
+    pub fn get_node(&self, f: Edge) -> Node {
+        self.node_store[f.inner_node_index().unwrap() as usize]
+    }
+
+    pub fn eval(&self, f: Edge, env: &[bool]) -> bool {
+        if let Some(v) = f.terminal_value() {
+            v
+        } else {
+            let node = self.get_node(f);
+            self.eval(
+                if env[node.level as usize] {
+                    node.t
+                } else {
+                    node.e
+                },
+                env,
+            )
+        }
+    }
+
     fn unique_table_get_or_insert(&mut self, node: Node) -> Edge {
-        Edge::Inner(match self.unique_table.entry(node.clone()) {
-            Entry::Occupied(entry) => entry.get().clone(),
-            Entry::Vacant(entry) => entry.insert(Rc::new(node)).clone(),
-        })
+        match self.unique_table.entry(node) {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(entry) => {
+                let idx = self.node_store.len() as u32;
+                let edge = Edge::to_inner_node(idx);
+                self.node_store.push(node);
+                *entry.insert(edge)
+            }
+        }
     }
 
     pub fn get_var(&mut self, level: u32) -> Edge {
         self.unique_table_get_or_insert(Node {
-            t: Edge::Terminal(true),
-            e: Edge::Terminal(false),
+            t: Edge::to_terminal(true),
+            e: Edge::to_terminal(false),
             level,
         })
     }
 
-    pub fn apply_and(&mut self, f: &Edge, g: &Edge) -> Edge {
+    pub fn apply_and(&mut self, f: Edge, g: Edge) -> Edge {
         if f == g {
-            return f.clone();
+            return f;
         }
 
-        let fnode = match f {
-            Edge::Terminal(false) => return Edge::Terminal(false),
-            Edge::Terminal(true) => return g.clone(),
-            Edge::Inner(node) => node,
-        };
-        let gnode = match g {
-            Edge::Terminal(false) => return Edge::Terminal(false),
-            Edge::Terminal(true) => return f.clone(),
-            Edge::Inner(node) => node,
-        };
+        match (f.terminal_value(), g.terminal_value()) {
+            (Some(false), _) | (_, Some(false)) => return Edge::to_terminal(false),
+            (Some(true), _) => return g,
+            (_, Some(true)) => return f,
+            (None, None) => {}
+        }
+        let fnode = self.get_node(f);
+        let gnode = self.get_node(g);
 
         // ∧ is commutative, so we use a canonical form of the key to increase
         // cache efficiency
-        let key = if f < g {
-            (f.clone(), g.clone())
-        } else {
-            (g.clone(), f.clone())
-        };
+        let key = if f < g { (f, g) } else { (g, f) };
         if let Some(res) = self.apply_and_cache.get(&key) {
-            return res.clone();
+            return *res;
         }
 
         // cofactors with respect to the top variable
         let (ft, fe) = if fnode.level <= gnode.level {
-            (&fnode.t, &fnode.e)
+            (fnode.t, fnode.e)
         } else {
             (f, f)
         };
         let (gt, ge) = if gnode.level <= fnode.level {
-            (&gnode.t, &gnode.e)
+            (gnode.t, gnode.e)
         } else {
             (g, g)
         };
@@ -150,29 +144,29 @@ impl Manager {
         };
         let res = self.unique_table_get_or_insert(node);
 
-        self.apply_and_cache.insert(key, res.clone());
+        self.apply_and_cache.insert(key, res);
 
         res
     }
 
-    pub fn apply_not(&mut self, f: &Edge) -> Edge {
-        let fnode = match f {
-            Edge::Terminal(t) => return Edge::Terminal(!t),
-            Edge::Inner(n) => n,
+    pub fn apply_not(&mut self, f: Edge) -> Edge {
+        let fnode = match f.terminal_value() {
+            Some(t) => return Edge::to_terminal(!t),
+            None => self.get_node(f),
         };
 
-        if let Some(res) = self.apply_not_cache.get(f) {
-            return res.clone();
+        if let Some(res) = self.apply_not_cache.get(&f) {
+            return *res;
         }
 
         let node = Node {
-            t: self.apply_not(&fnode.t),
-            e: self.apply_not(&fnode.e),
+            t: self.apply_not(fnode.t),
+            e: self.apply_not(fnode.e),
             level: fnode.level,
         };
         let res = self.unique_table_get_or_insert(node);
 
-        self.apply_not_cache.insert(f.clone(), res.clone());
+        self.apply_not_cache.insert(f, res);
 
         res
     }
@@ -233,17 +227,17 @@ mod test {
 
         fn build(&self, manager: &mut Manager) -> Edge {
             match self {
-                Formula::False => Edge::Terminal(false),
-                Formula::True => Edge::Terminal(true),
+                Formula::False => Edge::to_terminal(false),
+                Formula::True => Edge::to_terminal(true),
                 Formula::Var(i) => manager.get_var(*i),
                 Formula::Not(f) => {
                     let f = f.build(manager);
-                    manager.apply_not(&f)
+                    manager.apply_not(f)
                 }
                 Formula::And(f, g) => {
                     let f = f.build(manager);
                     let g = g.build(manager);
-                    manager.apply_and(&f, &g)
+                    manager.apply_and(f, g)
                 }
             }
         }
@@ -271,7 +265,7 @@ mod test {
                     for x3 in [false, true] {
                         let env = [x1, x2, x3];
                         let expected = formula.eval(&env);
-                        let actual = f.eval(&env);
+                        let actual = manager.eval(f, &env);
                         if actual != expected {
                             panic!(
                                 "Error for {formula:?} in {env:?}: expected {expected}, got {actual}\nDD: {f:?}"
