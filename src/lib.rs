@@ -1,3 +1,9 @@
+extern crate creusot_contracts;
+// TODO: when importing everything from creusot_contracts
+// there seems to be name clash with respect to things imported
+// from other creates
+use creusot_contracts::{std, Clone, PartialEq, *};
+
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -16,6 +22,7 @@ impl Edge {
         Self(value as u32)
     }
 
+    #[requires(index@ <= usize::MAX@ - Self::NUM_TERMINALS)]
     fn to_inner_node(index: u32) -> Self {
         Self(index + Self::NUM_TERMINALS)
     }
