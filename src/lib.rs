@@ -264,6 +264,9 @@ struct ApplyAndCacheWrapper (HashMap<(Edge, Edge), Edge>);
 #[derive(Debug)]
 pub struct Manager {
     node_store: Vec<Node>,
+    // From OxiDD's paper: Here, it is assumed that the get_or_make_node function 
+    // at the bottom also maintains reducedness, typically implemented using a
+    // hash table called unique table
     unique_table: UniqueTableWrapper,
     apply_not_cache: ApplyNotCacheWrapper,
     apply_and_cache: ApplyAndCacheWrapper,
@@ -352,7 +355,6 @@ impl Manager {
         }
     }
 
-    // Cannot guarantee panics absence if we eval over an arbitrary Manager
     #[requires(self.invariant_sound_node_store())]
     // To avoid integer overflow when pushing into self.node_store
     #[requires(Seq::len(self.node_store@) < u32::MAX@)]
@@ -368,6 +370,8 @@ impl Manager {
         }
     }
 
+    // Cannot guarantee panics absence if we eval over an arbitrary Manager
+    #[requires(self.invariant_sound_node_store())]
     pub fn get_var(&mut self, level: u32) -> Edge {
         self.unique_table_get_or_insert(Node {
             t: Edge::to_terminal(true),
@@ -376,6 +380,19 @@ impl Manager {
         })
     }
 
+    
+    // TODO: why does apply_and receives and returns Edges, instead of Nodes?
+    // We are working over a sound node_store
+    #[requires(self.invariant_sound_node_store())]
+    // Part of get_node's pre-condition
+    // TODO: ugly, here I am speaking about implementation details
+    #[requires(f.0@ - Edge::NUM_TERMINALS@ < Seq::len(self.node_store@))]
+    #[requires(g.0@ - Edge::NUM_TERMINALS@ < Seq::len(self.node_store@))]
+    // If one of the Edges point to a terminal, the Manager is not modified
+    #[ensures(f.0@ < 2 ==> ^self == *self)]
+    #[ensures(g.0@ < 2 ==> ^self == *self)]
+    // Either way, the obtained manager preserves the invariant
+    #[ensures((^self).invariant_sound_node_store())]
     pub fn apply_and(&mut self, f: Edge, g: Edge) -> Edge {
         if f == g {
             return f;
@@ -387,6 +404,7 @@ impl Manager {
             (_, Some(true)) => return f,
             (None, None) => {}
         }
+
         let fnode = self.get_node(f);
         let gnode = self.get_node(g);
 
@@ -403,12 +421,22 @@ impl Manager {
         } else {
             (f, f)
         };
+        
         let (gt, ge) = if gnode.level <= fnode.level {
             (gnode.t, gnode.e)
         } else {
             (g, g)
         };
+        proof_assert!(fnode == self.node_store[f.0@ - Edge::NUM_TERMINALS@]);
+        proof_assert!(fnode.e.0@ - Edge::NUM_TERMINALS@ < Seq::len(self.node_store@));
+        proof_assert!(fe == fnode.e || fe == f);
+        proof_assert!(fe.0@ - Edge::NUM_TERMINALS@ < Seq::len(self.node_store@));
+        proof_assert!(ge.0@ - Edge::NUM_TERMINALS@ < Seq::len(self.node_store@));
 
+        // TODO: the problem with fe and ge could be related with the lack of
+        // guarantees about the Manager after the first self.apply_and(ft, gt).
+        // Add some post-condition about the state of the manager after the
+        // call to apply_and
         let node = Node {
             t: self.apply_and(ft, gt),
             e: self.apply_and(fe, ge),
@@ -424,6 +452,7 @@ impl Manager {
     pub fn apply_not(&mut self, f: Edge) -> Edge {
         let fnode = match f.terminal_value() {
             Some(t) => return Edge::to_terminal(!t),
+            // TODO: could it be that self.get_node(f) is not required?
             None => self.get_node(f),
         };
 
