@@ -84,19 +84,24 @@ impl Manager {
         }
     }
 
-    fn unique_table_get_or_insert(&mut self, node: Node) -> Edge {
-        match self.unique_table.entry(node) {
+    fn unique_table_get_or_insert(&mut self, node: Node) -> Option<Edge> {
+        Some(match self.unique_table.entry(node) {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {
-                let idx = self.node_store.len() as u32;
+                let idx = self.node_store.len();
+                if idx >= (1usize << u32::BITS) {
+                    return None; // out of memory
+                }
+                let idx = idx as u32;
                 let edge = Edge::to_inner_node(idx);
                 self.node_store.push(node);
                 *entry.insert(edge)
             }
-        }
+        })
     }
 
-    pub fn get_var(&mut self, level: u32) -> Edge {
+    /// Returns [`None`] in an out-of-memory situation
+    pub fn get_var(&mut self, level: u32) -> Option<Edge> {
         self.unique_table_get_or_insert(Node {
             t: Edge::to_terminal(true),
             e: Edge::to_terminal(false),
@@ -104,15 +109,16 @@ impl Manager {
         })
     }
 
-    pub fn apply_and(&mut self, f: Edge, g: Edge) -> Edge {
+    /// Returns [`None`] in an out-of-memory situation
+    pub fn apply_and(&mut self, f: Edge, g: Edge) -> Option<Edge> {
         if f == g {
-            return f;
+            return Some(f);
         }
 
         match (f.terminal_value(), g.terminal_value()) {
-            (Some(false), _) | (_, Some(false)) => return Edge::to_terminal(false),
-            (Some(true), _) => return g,
-            (_, Some(true)) => return f,
+            (Some(false), _) | (_, Some(false)) => return Some(Edge::to_terminal(false)),
+            (Some(true), _) => return Some(g),
+            (_, Some(true)) => return Some(f),
             (None, None) => {}
         }
         let fnode = self.get_node(f);
@@ -122,7 +128,7 @@ impl Manager {
         // cache efficiency
         let key = if f < g { (f, g) } else { (g, f) };
         if let Some(res) = self.apply_and_cache.get(&key) {
-            return *res;
+            return Some(*res);
         }
 
         // cofactors with respect to the top variable
@@ -138,37 +144,38 @@ impl Manager {
         };
 
         let node = Node {
-            t: self.apply_and(ft, gt),
-            e: self.apply_and(fe, ge),
+            t: self.apply_and(ft, gt)?,
+            e: self.apply_and(fe, ge)?,
             level: std::cmp::min(fnode.level, gnode.level),
         };
-        let res = self.unique_table_get_or_insert(node);
+        let res = self.unique_table_get_or_insert(node)?;
 
         self.apply_and_cache.insert(key, res);
 
-        res
+        Some(res)
     }
 
-    pub fn apply_not(&mut self, f: Edge) -> Edge {
+    /// Returns [`None`] in an out-of-memory situation
+    pub fn apply_not(&mut self, f: Edge) -> Option<Edge> {
         let fnode = match f.terminal_value() {
-            Some(t) => return Edge::to_terminal(!t),
+            Some(t) => return Some(Edge::to_terminal(!t)),
             None => self.get_node(f),
         };
 
         if let Some(res) = self.apply_not_cache.get(&f) {
-            return *res;
+            return Some(*res);
         }
 
         let node = Node {
-            t: self.apply_not(fnode.t),
-            e: self.apply_not(fnode.e),
+            t: self.apply_not(fnode.t)?,
+            e: self.apply_not(fnode.e)?,
             level: fnode.level,
         };
-        let res = self.unique_table_get_or_insert(node);
+        let res = self.unique_table_get_or_insert(node)?;
 
         self.apply_not_cache.insert(f, res);
 
-        res
+        Some(res)
     }
 }
 
@@ -225,18 +232,18 @@ mod test {
             true
         }
 
-        fn build(&self, manager: &mut Manager) -> Edge {
+        fn build(&self, manager: &mut Manager) -> Option<Edge> {
             match self {
-                Formula::False => Edge::to_terminal(false),
-                Formula::True => Edge::to_terminal(true),
+                Formula::False => Some(Edge::to_terminal(false)),
+                Formula::True => Some(Edge::to_terminal(true)),
                 Formula::Var(i) => manager.get_var(*i),
                 Formula::Not(f) => {
-                    let f = f.build(manager);
+                    let f = f.build(manager)?;
                     manager.apply_not(f)
                 }
                 Formula::And(f, g) => {
-                    let f = f.build(manager);
-                    let g = g.build(manager);
+                    let f = f.build(manager)?;
+                    let g = g.build(manager)?;
                     manager.apply_and(f, g)
                 }
             }
@@ -259,7 +266,7 @@ mod test {
 
         let mut formula = Formula::False;
         loop {
-            let f = formula.build(&mut manager);
+            let f = formula.build(&mut manager).unwrap();
             for x1 in [false, true] {
                 for x2 in [false, true] {
                     for x3 in [false, true] {
