@@ -8,7 +8,10 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 #clap = "2.33.3"
+# NOTE: DO NOT DELETE THIS LINE
 creusot-contracts = { git = "https://github.com/xldenis/creusot", version = "^0", rev = "0e2690c0" }
+# creusot-contracts = { git = "https://github.com/xldenis/creusot" }
+
 
 [features]
 contracts = ["creusot-contracts/contracts"]

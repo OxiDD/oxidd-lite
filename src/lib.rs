@@ -2,11 +2,18 @@ extern crate creusot_contracts;
 // TODO: when importing everything from creusot_contracts
 // there seems to be name clash with respect to things imported
 // from other creates
-use creusot_contracts::{std, Clone, PartialEq, logic, *};
+use creusot_contracts::{std, Clone, PartialEq, logic::Mapping, *};
+
+// Axiomatization of HashMaps
+mod hashmap_spec;
+use hashmap_spec::hashmap_spec::HashMapWrapper;
+use hashmap_spec::hashmap_spec::EntryWrapper;
+use hashmap_spec::hashmap_spec::HashMapPreservesProps;
 
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+// NOTE: using our own hash-map wrapper
+//use std::collections::HashMap;
 use std::hash::Hash;
 
 // spell-checker:ignore fnode,gnode
@@ -17,7 +24,9 @@ use std::hash::Hash;
 // about this total order, we would need to define ourselves this relation
 // to guarantee that both orders coincide
 // #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+// TODO: warning: calling an external function with no contract will yield an impossible precondition
+//#[derive(Debug)]    
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Edge(u32);
 
 impl ShallowModel for Edge {
@@ -46,16 +55,35 @@ impl Ord for Edge {
     }
 }
 
+impl creusot_contracts::Default for Edge {
+    #[predicate]
+    #[open]
+    fn is_default(self) -> bool {
+        // TODO: ?
+        pearlite! { self.0@ == 0 }
+    }
+}
 
 impl Edge {
+
     const NUM_TERMINALS: u32 = 2;
 
+    #[ensures(!result.points_to_inner_node())]
     pub fn to_terminal(value: bool) -> Self {
         Self(value as u32)
     }
 
     // To avoid overflow
-    #[requires(index <= u32::MAX - Self::NUM_TERMINALS)]
+    #[predicate]
+    fn to_inner_node_precondition(index : Int) -> bool {
+        pearlite! { index <= u32::MAX@ - Self::NUM_TERMINALS@ }
+    }
+
+    #[requires(Edge::to_inner_node_precondition(index@))]
+    #[ensures(result.points_to_inner_node())]
+    // TODO: ugly, but it solves problems later, when reasoning
+    // about the value of to_inner_node(index)
+    #[ensures(result.0@ == index@ + Self::NUM_TERMINALS@)]
     fn to_inner_node(index: u32) -> Self {
         Self(index + Self::NUM_TERMINALS)
     }
@@ -71,7 +99,6 @@ impl Edge {
             None
         }
     }
-
     
     #[ensures(self.0@ >= 2 ==> result != None)]
     // TODO: forced to do this; otherwise: ShallowModel for Option(u32)
@@ -87,6 +114,21 @@ impl Edge {
             None
         }
     }
+
+    // Useful to abstract the mechanism implemented by inner_node_index,
+    // for specification purposes
+    #[predicate]
+    fn points_to_inner_node(self) -> bool {
+        // TODO: NUM_TERMINALS?
+        pearlite! { self.0@ >= 2 }
+    }
+
+    #[logic]
+    #[requires(self.points_to_inner_node())]
+    fn inner_node_index_logic(self) -> Int {
+        pearlite! { self.0@ - Self::NUM_TERMINALS@ }
+    }
+
 }
 
 // Creusot requirements:
@@ -213,7 +255,9 @@ impl OrdLogic for Edge {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+// TODO: warning: calling an external function with no contract will yield an impossible precondition
+//#[derive(Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Node {
     /// Level number, must be less than `t.level` and `e.level` (given that
     /// these point to inner nodes)
@@ -249,100 +293,209 @@ impl ShallowModel for Node {
     }
 }
 
-// Creusot forces me to implement traits for these types. 
-// To avoid problems with the orphan rule, we use the newtype pattern
-#[derive(Debug)]
-struct UniqueTableWrapper (HashMap<Node, Edge>);
-#[derive(Debug)]
-struct ApplyNotCacheWrapper (HashMap<Edge, Edge>);
-#[derive(Debug)]
-struct ApplyAndCacheWrapper (HashMap<(Edge, Edge), Edge>);
+impl creusot_contracts::Default for Node {
+    #[predicate]
+    #[open]
+    fn is_default(self) -> bool {
+        // TODO: stub!
+        pearlite! { self.t@ == 0 && self.t@ == 1 && self.level@ == 0 }
+    }
+}
 
-// TODO: to avoid Creusot asking me to implement a Default trait over
-// type HashMap<_, _>
-//#[derive(Default, Debug)]
-#[derive(Debug)]
+// TODO: warning: calling an external function with no contract will yield an impossible precondition
+//#[derive(Debug)]
+#[derive(Default)]
 pub struct Manager {
     node_store: Vec<Node>,
     // From OxiDD's paper: Here, it is assumed that the get_or_make_node function 
     // at the bottom also maintains reducedness, typically implemented using a
     // hash table called unique table
-    unique_table: UniqueTableWrapper,
-    apply_not_cache: ApplyNotCacheWrapper,
-    apply_and_cache: ApplyAndCacheWrapper,
+    unique_table: HashMapWrapper<Node, Edge>,
+    apply_not_cache: HashMapWrapper<Edge, Edge>,
+    apply_and_cache: HashMapWrapper<(Edge, Edge), Edge>,
 }
 
-// TODO: put models into another crate?
-// impl ShallowModel for UniqueTableWrapper {
-//     // We will look at HashMap<Node, Edge> as a simple mapping Node -> Edge
-//     type ShallowModelTy = logic::Mapping<Node, Edge>;
+impl HashMapPreservesProps<Node, Edge> for HashMapWrapper<Node, Edge> {
 
-//     #[logic]
-//     fn shallow_model(self) -> Self::ShallowModelTy {
-//      logic::Mapping(std::marker::PhantomData)
-//     }
-// }
+        // Predicate that should be preserved by the entry method
+        #[open]
+        #[predicate]
+        #[trusted]
+        fn entry_predicate(self, key : Node) -> bool{
+            absurd
+        }
+    }
+
+impl creusot_contracts::Default for Manager {
+    #[predicate]
+    #[open]
+    #[requires(self.manager_invariant())]
+    fn is_default(self) -> bool {
+        // NOTE: if self.manager_invariant(), we can reduce
+        // the predicate to just this
+        pearlite! { Seq::len(self.node_store@) == 0 }
+    }
+}
+
+impl ShallowModel for Manager {
+    type ShallowModelTy = Manager;
+    
+    #[open]
+    #[logic]
+    // TODO: ?
+    fn shallow_model(self) -> Self::ShallowModelTy {
+        self
+    }
+}
 
 impl Manager {
-    //#[ensures(result.node_store@ == logic::Seq::EMPTY)]
+    // TODO: check this
+    // #[ensures(Manager::is_default(result))]
+    // #[ensures(result.manager_invariant())]
     pub fn new() -> Self {
-        // TODO: to avoid Creusot asking me to implement a Default trait
-        // Self::default()
-        Manager {
-            // TODO: warning: calling an external function with no contract will yield an impossible precondition
-            node_store: Vec::new(),
-            unique_table: UniqueTableWrapper(HashMap::new()),
-            apply_not_cache: ApplyNotCacheWrapper(HashMap::new()),
-            apply_and_cache: ApplyAndCacheWrapper(HashMap::new()),
+        Self::default()
+    }
+
+    ///////////////////////////////////
+    // Predicates about Manager
+    ///////////////////////////////////
+    #[predicate]
+    fn manager_invariant(self) -> bool {
+        pearlite! {
+            self.node_store_invariant()
+            &&
+            self.unique_table_invariant()
+            &&
+            self.apply_and_cache_invariant()
+            // TODO: it would be useful, though Creusot requires for me to
+            // implement trait std::iter::ExactSizeIterator
+            // &&
+            // Seq::len(self.node_store@) == Mapping::len(self.unique_table@)
         }
+    }
+
+    ///////////////////////////////////
+    // Predicates about self.unique_table
+    ///////////////////////////////////
+    // Edge points to an existing node
+    #[predicate]
+    fn edge_invariant (&self, edge : Edge) -> bool {
+        pearlite! { 
+            edge.points_to_inner_node() ==>
+                edge.inner_node_index_logic() < Seq::len(self.node_store@)
+        }
+    }
+
+    // Every edge satisfies edge_invariant
+    // TODO: would it help quantify only over the keys of the hash?
+    #[predicate]
+    fn unique_table_invariant(&self) -> bool {
+        pearlite! {
+            (forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==> 
+             exists<e : Edge> (self.unique_table)@.get(self.node_store@[i]) == Some(e))
+            &&
+            forall<node : Node>
+            forall<e : Edge> 
+                (self.unique_table)@.get(node) == Some(e) ==>
+                self.edge_invariant(e)
+                &&
+                e.points_to_inner_node() 
+                && 
+                self.node_store@[e.inner_node_index_logic()] == node
+        }
+    }
+    
+    /////////////////////////////////////////////////////
+    // Predicates about self.node_store and related stuff
+    /////////////////////////////////////////////////////
+    
+    // For spec. purposes
+    // Sound node, with respect to the actual instance of Manager
+    #[predicate]
+    fn node_invariant (self, node : Node) -> bool {
+        pearlite! { self.edge_invariant(node.t) && self.edge_invariant(node.e) }
+    }
+
+    // We can still store at least on element in self.node_store
+    // TODO: see if we really need to separate it from the predicate 
+    // Seq::len(self.node_store@) <= u32::MAX@ - Edge::NUM_TERMINALS@
+    #[predicate]
+    fn node_store_has_space_left(self) -> bool {
+        pearlite! { Seq::len(self.node_store@) < u32::MAX@ }
     }
 
     // Invariant about node_store
     #[predicate]
-    fn invariant_sound_node_store(self) -> bool {
+    fn node_store_invariant(self) -> bool {
         pearlite! {
-            // Seq::len(self.node_store@) is used as parameter to to_inner_node, 
-            // in unique_table_get_or_insert;
-            Seq::len(self.node_store@) <= u32::MAX@ - Edge::NUM_TERMINALS@
-            &&
-            forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==> 
-                // Every node level corresponds to its index in node_store
-                self.node_store[i].level@ == i
-                &&
+            forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==>
                 // Every edge that does not point to a terminal, points to an 
                 // existing node
-                (self.node_store[i]).t.0@ - Edge::NUM_TERMINALS@ < Seq::len(self.node_store@)
-                &&
-                (self.node_store[i]).e.0@ - Edge::NUM_TERMINALS@ < Seq::len(self.node_store@)
-                
+                self.node_invariant(self.node_store[i])
         }
     }
 
+    // Checks if self.node_store is a "prefix" of another_store
+    #[predicate]
+    fn node_store_is_prefix(store : Vec<Node>, prefix_store : Vec<Node> ) -> bool {
+        pearlite! { Seq::len(prefix_store@) <= Seq::len(store@)
+                    &&
+                    forall<i : Int> 0 <= i && i < Seq::len(prefix_store@) ==>
+                                    store@[i] == prefix_store@[i] }
+    }
+
+    /////////////////////////////////////////////////////
+    // Predicates about self.apply_and_cache
+    /////////////////////////////////////////////////////
+    // Invariant about apply_and_cache
+        #[predicate]
+    fn apply_and_cache_invariant(self) -> bool {
+        pearlite! {
+            forall<pair : (Edge, Edge)> 
+                match self.apply_and_cache@.get(pair) {
+                    Some(edge) => self.edge_invariant(edge),
+                    None => true
+                }
+        }
+    }
+
+
     /// Panics if self points to
     // To avoid inner_node_index() == None
-    // TODO: ugly, I am exposing implementation details
-    #[requires(f.0@ >= 2)]
+    // TODO: abstract these conditions that expose implementation details into 
+    // predicates, and use the predicates for spec. purposes
+    #[requires(f.points_to_inner_node())]
     // To guarantee index within bounds
     // TODO: ugly, here I am speaking about implementation details
-    #[requires(f.0@ - Edge::NUM_TERMINALS@ < Seq::len(self.node_store@))]
-    #[ensures(result == self.node_store[f.0@ - Edge::NUM_TERMINALS@])]
+    #[requires(f.inner_node_index_logic() < Seq::len(self.node_store@))]
+    #[ensures(result == self.node_store[f.inner_node_index_logic()])]
     pub fn get_node(&self, f: Edge) -> Node {
         self.node_store[f.inner_node_index().unwrap() as usize]
     }
       
     // Cannot guarantee panics absence if we eval over an arbitrary Manager
-    #[requires(self.invariant_sound_node_store())]
+    #[requires(self.manager_invariant())]
     // To satisfy get_node's precondition
-    // TODO: ugly, I am exposing implementation details
-    #[requires(f.0@ >= 2 ==> f.0@ - Edge::NUM_TERMINALS@ < Seq::len(self.node_store@))]
-    // To guarantee index within bounds of env
-    #[requires(f.0@ >= 2 ==> self.node_store@[f.0@ - Edge::NUM_TERMINALS@].level@ < Seq::len(env@))]
-    #[requires(Seq::len(env@) == Seq::len(self.node_store@))]
+    #[requires(f.points_to_inner_node() ==> 
+               f.inner_node_index_logic() < Seq::len(self.node_store@))]
+    // To preserve the previous property on recursive calls
+    #[requires(forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==>
+                                  self.node_invariant(self.node_store[i]))]
+    // To guarantee index of env, within bounds
+    #[requires(f.points_to_inner_node() ==> 
+               self.node_store[f.inner_node_index_logic()].level@ < Seq::len(env@))]
+    // To preserve the previous property on recursive calls
+    #[requires(forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==>
+                self.node_store[i].t.points_to_inner_node() ==> 
+                self.node_store[self.node_store[i].t.inner_node_index_logic()].level@ < Seq::len(env@))]
+
+    #[requires(forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==>
+                self.node_store[i].e.points_to_inner_node() ==> 
+                self.node_store[self.node_store[i].e.inner_node_index_logic()].level@ < Seq::len(env@))]
     pub fn eval(&self, f: Edge, env: &[bool]) -> bool {
         if let Some(v) = f.terminal_value() {
             v
         } else {
-            proof_assert!(f.0@ >= 2);
             let node = self.get_node(f);
             self.eval(
                 if env[node.level as usize] {
@@ -355,64 +508,136 @@ impl Manager {
         }
     }
 
-    #[requires(self.invariant_sound_node_store())]
-    // To avoid integer overflow when pushing into self.node_store
-    #[requires(Seq::len(self.node_store@) < u32::MAX@)]
-    fn unique_table_get_or_insert(&mut self, node: Node) -> Edge {
-        match self.unique_table.0.entry(node) {
-            Entry::Occupied(entry) => *entry.get(),
-            Entry::Vacant(entry) => {
-                let idx = self.node_store.len() as u32;
-                let edge = Edge::to_inner_node(idx);
-                self.node_store.push(node);
-                *entry.insert(edge)
-            }
+    #[predicate]
+    // NOTE: this pre-condition is more restrictive than what is actually needed
+    // for a successful execution of unique_table_get_or_insert, on the general
+    // case
+    // TODO: add remaining conditions
+    fn unique_table_get_or_insert_precondition(&self, node: Node) -> bool {
+        pearlite! { // TODO: not a pre-condition anymore, since unique_table_get_or_insert
+                    // can return None if out-of-memory problems exist
+                    // Edge::to_inner_node_precondition(Seq::len(self.node_store@))
+                    // &&
+                    self.manager_invariant()
+                    &&
+                    // To guarantee that we are adding a node that preserves our invariants
+                    self.node_invariant(node)
         }
     }
 
-    // Cannot guarantee panics absence if we eval over an arbitrary Manager
-    #[requires(self.invariant_sound_node_store())]
-    pub fn get_var(&mut self, level: u32) -> Edge {
+    #[requires(self.unique_table_get_or_insert_precondition(node))]
+    // If we modify self.node_store, it is just by adding new nodes
+    #[ensures(Manager::node_store_is_prefix((^self).node_store, (*self).node_store))]
+    #[ensures((^self).manager_invariant())]
+    #[ensures(match result {
+                    Some(e) => (^self).edge_invariant(e),
+                    None => true
+              })]
+    fn unique_table_get_or_insert(&mut self, node: Node) -> Option<Edge> {
+        let old_node_store = snapshot! { self.node_store };
+
+        let e = match self.unique_table.entry(node) {
+            EntryWrapper::OccupiedWrapper(entry) => {
+                let e = *entry.get();
+                proof_assert!((^self).edge_invariant(e));
+                proof_assert!((^self).manager_invariant());
+                e
+            }
+            EntryWrapper::VacantWrapper(entry) => { 
+                let idx = self.node_store.len();
+                // To comply with to_inner_node's pre
+                if idx > (u32::MAX - Edge::NUM_TERMINALS) as usize {
+                    proof_assert!((^self).manager_invariant());
+                    return None; // out of memory
+                }
+                let idx = idx as u32;
+                let edge = Edge::to_inner_node(idx);
+                self.node_store.push(node);
+                let res = self.unique_table.insert(node, edge);
+                proof_assert!(edge.inner_node_index_logic() == idx@);
+                proof_assert!(edge.points_to_inner_node());
+                proof_assert!(edge.inner_node_index_logic() < idx@ + 1);
+                proof_assert!((^self).node_store@[edge.inner_node_index_logic()] == node);
+                proof_assert!((^self).edge_invariant(edge));
+                //proof_assert!(((^self).unique_table)@.get(self.node_store@[edge.inner_node_index_logic()]) == Some(edge));
+                proof_assert!(Manager::node_store_is_prefix((^self).node_store, *old_node_store));
+                // proof_assert!((forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==> 
+                //                match (self.unique_table)@.get(self.node_store@[i]) {
+                //                    Some(e) => i == e.inner_node_index_logic(),
+                //                    None => true
+                //                }));
+                
+                proof_assert!(forall<node : Node> 
+                              match (self.unique_table)@.get(node) {
+                                  Some(e) => 
+                                      self.edge_invariant(e)
+                                      &&
+                                      e.points_to_inner_node() 
+                                      && 
+                                      self.node_store@[e.inner_node_index_logic()] == node,
+                                  None => true
+                              });
+                proof_assert!((^self).node_store_invariant());
+                edge
+            }
+        };
+
+        // To help in verifying post-condition about returned edge
+        proof_assert!((^self).edge_invariant(e));
+        proof_assert!(Seq::len((*self).node_store@) < Seq::len((^self).node_store@) ==> (*self).unique_table_invariant());
+        proof_assert!((^self).node_store_invariant());
+        Some(e)
+    }
+
+    /// Returns [`None`] in an out-of-memory situation
+    // // To satisfy pre-condition of unique_table_get_or_insert
+    #[requires(self.manager_invariant())]
+    #[requires(Seq::len(self.node_store@) <= u32::MAX@ - Edge::NUM_TERMINALS@)]
+    #[ensures((^self).manager_invariant())]
+    pub fn get_var(&mut self, level: u32) -> Option<Edge> {
         self.unique_table_get_or_insert(Node {
             t: Edge::to_terminal(true),
             e: Edge::to_terminal(false),
             level,
         })
     }
-
     
-    // TODO: why does apply_and receives and returns Edges, instead of Nodes?
-    // We are working over a sound node_store
-    #[requires(self.invariant_sound_node_store())]
-    // Part of get_node's pre-condition
-    // TODO: ugly, here I am speaking about implementation details
-    #[requires(f.0@ - Edge::NUM_TERMINALS@ < Seq::len(self.node_store@))]
-    #[requires(g.0@ - Edge::NUM_TERMINALS@ < Seq::len(self.node_store@))]
-    // If one of the Edges point to a terminal, the Manager is not modified
-    #[ensures(f.0@ < 2 ==> ^self == *self)]
-    #[ensures(g.0@ < 2 ==> ^self == *self)]
-    // Either way, the obtained manager preserves the invariant
-    #[ensures((^self).invariant_sound_node_store())]
-    pub fn apply_and(&mut self, f: Edge, g: Edge) -> Edge {
+    /// Returns [`None`] in an out-of-memory situation
+    // We are working over a sound manager (sound node_store, etc)
+    #[requires(self.manager_invariant())]
+    // get_node's pre-condition
+    #[requires(f.points_to_inner_node() ==> f.inner_node_index_logic() < Seq::len(self.node_store@))]
+    #[requires(g.points_to_inner_node() ==> g.inner_node_index_logic() < Seq::len(self.node_store@))]
+    // The obtained manager preserves the invariant
+    #[ensures((^self).manager_invariant())]
+    // If we modify self.node_store, it is just by adding new nodes
+    #[ensures(Manager :: node_store_is_prefix((^self).node_store, (*self).node_store))]
+    // To guarantee properties required by unique_table_get_or_insert, about the
+    // received node
+    #[ensures(match result {
+                 Some(e) => (^self).edge_invariant(e),
+                 None => true
+              })]
+    pub fn apply_and(&mut self, f: Edge, g: Edge) -> Option<Edge> {
         if f == g {
-            return f;
+            return Some(f);
         }
-
+        
         match (f.terminal_value(), g.terminal_value()) {
-            (Some(false), _) | (_, Some(false)) => return Edge::to_terminal(false),
-            (Some(true), _) => return g,
-            (_, Some(true)) => return f,
+            (Some(false), _) | (_, Some(false)) => return Some(Edge::to_terminal(false)),
+            (Some(true), _) => return Some(g),
+            (_, Some(true)) => return Some(f),
             (None, None) => {}
         }
-
         let fnode = self.get_node(f);
+
         let gnode = self.get_node(g);
 
         // ∧ is commutative, so we use a canonical form of the key to increase
         // cache efficiency
         let key = if f < g { (f, g) } else { (g, f) };
-        if let Some(res) = self.apply_and_cache.0.get(&key) {
-            return *res;
+        if let Some(res) = self.apply_and_cache.get(&key) {
+            return Some(*res);
         }
 
         // cofactors with respect to the top variable
@@ -427,49 +652,82 @@ impl Manager {
         } else {
             (g, g)
         };
-        proof_assert!(fnode == self.node_store[f.0@ - Edge::NUM_TERMINALS@]);
-        proof_assert!(fnode.e.0@ - Edge::NUM_TERMINALS@ < Seq::len(self.node_store@));
-        proof_assert!(fe == fnode.e || fe == f);
-        proof_assert!(fe.0@ - Edge::NUM_TERMINALS@ < Seq::len(self.node_store@));
-        proof_assert!(ge.0@ - Edge::NUM_TERMINALS@ < Seq::len(self.node_store@));
 
-        // TODO: the problem with fe and ge could be related with the lack of
-        // guarantees about the Manager after the first self.apply_and(ft, gt).
-        // Add some post-condition about the state of the manager after the
-        // call to apply_and
-        let node = Node {
-            t: self.apply_and(ft, gt),
-            e: self.apply_and(fe, ge),
-            level: std::cmp::min(fnode.level, gnode.level),
-        };
-        let res = self.unique_table_get_or_insert(node);
+        let ret;
 
-        self.apply_and_cache.0.insert(key, res);
+        let ft_and_gt = self.apply_and(ft, gt);
+        let fe_and_ge = self.apply_and(fe, ge);
 
-        res
+        match (ft_and_gt, fe_and_ge) {
+            (Some(t), Some(e)) => {
+                let node = Node {
+                    t: t,
+                    e: e,
+                    level: std::cmp::min(fnode.level, gnode.level),
+                };
+                
+                match self.unique_table_get_or_insert(node) {
+                    Some(edge) => {
+                        self.apply_and_cache.insert(key, edge);
+                        proof_assert!((^self).edge_invariant(edge));
+                        proof_assert!((^self).apply_and_cache_invariant());
+                        ret = Some(edge)
+                    }
+
+                    None => ret = None
+                }
+            },
+
+            (_, _) => ret = None
+        }
+        
+        ret
     }
 
-    pub fn apply_not(&mut self, f: Edge) -> Edge {
+    /// Returns [`None`] in an out-of-memory situation
+    // get_node's pre-condition
+    #[requires(f.points_to_inner_node() ==> f.inner_node_index_logic() < Seq::len(self.node_store@))]
+    // To preserve pre-conditions on recursive calls
+    #[requires(forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==>
+                self.node_store[i].t.points_to_inner_node() ==> 
+                self.node_store[i].t.inner_node_index_logic() < Seq::len(self.node_store@))]
+    #[requires(forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==>
+                self.node_store[i].e.points_to_inner_node() ==> 
+                self.node_store[i].e.inner_node_index_logic() < Seq::len(self.node_store@))]
+    pub fn apply_not(&mut self, f: Edge) -> Option<Edge> {
         let fnode = match f.terminal_value() {
-            Some(t) => return Edge::to_terminal(!t),
-            // TODO: could it be that self.get_node(f) is not required?
+            Some(t) => return Some(Edge::to_terminal(!t)),
             None => self.get_node(f),
         };
 
-        if let Some(res) = self.apply_not_cache.0.get(&f) {
-            return *res;
+        if let Some(res) = self.apply_not_cache.get(&f) {
+            return Some(*res);
         }
 
-        let node = Node {
-            t: self.apply_not(fnode.t),
-            e: self.apply_not(fnode.e),
-            level: fnode.level,
-        };
-        let res = self.unique_table_get_or_insert(node);
+        let ret;
 
-        self.apply_not_cache.0.insert(f, res);
+        match (self.apply_not(fnode.t), self.apply_not(fnode.e)) {
+            (Some(t), Some(e)) => {
+                let node = Node {
+                    t: e,
+                    e: t,
+                    level: fnode.level,
+                };
+                
+                match self.unique_table_get_or_insert(node) {
+                    Some(edge) => {
+                        self.apply_not_cache.insert(f, edge);
+                        ret = Some(edge)
+                    },
+                    
+                    None => ret = None
+                }
+            },
 
-        res
+            _ => ret = None
+        }
+
+        ret
     }
 }
 
@@ -477,7 +735,9 @@ impl Manager {
 mod test {
     use super::*;
 
-    #[derive(Clone, PartialEq, Eq, Debug)]
+    // TODO: warning: calling an external function with no contract will yield an impossible precondition
+    //#[derive(Debug)]
+    #[derive(Clone, PartialEq, Eq)]
     enum Formula {
         False,
         True,
@@ -526,18 +786,18 @@ mod test {
             true
         }
 
-        fn build(&self, manager: &mut Manager) -> Edge {
+        fn build(&self, manager: &mut Manager) -> Option<Edge> {
             match self {
-                Formula::False => Edge::to_terminal(false),
-                Formula::True => Edge::to_terminal(true),
+                Formula::False => Some(Edge::to_terminal(false)),
+                Formula::True => Some(Edge::to_terminal(true)),
                 Formula::Var(i) => manager.get_var(*i),
                 Formula::Not(f) => {
-                    let f = f.build(manager);
+                    let f = f.build(manager)?;
                     manager.apply_not(f)
                 }
                 Formula::And(f, g) => {
-                    let f = f.build(manager);
-                    let g = g.build(manager);
+                    let f = f.build(manager)?;
+                    let g = g.build(manager)?;
                     manager.apply_and(f, g)
                 }
             }
@@ -560,7 +820,7 @@ mod test {
 
         let mut formula = Formula::False;
         loop {
-            let f = formula.build(&mut manager);
+            let f = formula.build(&mut manager).unwrap();
             for x1 in [false, true] {
                 for x2 in [false, true] {
                     for x3 in [false, true] {
@@ -581,4 +841,3 @@ mod test {
         }
     }
 }
-
