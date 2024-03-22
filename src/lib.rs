@@ -649,8 +649,8 @@ impl Manager {
         match (ft_and_gt, fe_and_ge) {
             (Some(t), Some(e)) => {
                 let node = Node {
-                    t: t,
-                    e: e,
+                    t,
+                    e,
                     level: std::cmp::min(fnode.level, gnode.level),
                 };
                 
@@ -697,8 +697,8 @@ impl Manager {
         match (self.apply_not(fnode.t), self.apply_not(fnode.e)) {
             (Some(t), Some(e)) => {
                 let node = Node {
-                    t: e,
-                    e: t,
+                    t,
+                    e,
                     level: fnode.level,
                 };
                 
