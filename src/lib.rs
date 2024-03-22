@@ -84,7 +84,10 @@ impl Manager {
         }
     }
 
-    fn unique_table_get_or_insert(&mut self, node: Node) -> Option<Edge> {
+    fn reduce(&mut self, node: Node) -> Option<Edge> {
+        if node.t == node.e {
+            return Some(node.t);
+        }
         Some(match self.unique_table.entry(node) {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {
@@ -102,7 +105,7 @@ impl Manager {
 
     /// Returns [`None`] in an out-of-memory situation
     pub fn get_var(&mut self, level: u32) -> Option<Edge> {
-        self.unique_table_get_or_insert(Node {
+        self.reduce(Node {
             t: Edge::to_terminal(true),
             e: Edge::to_terminal(false),
             level,
@@ -148,7 +151,7 @@ impl Manager {
             e: self.apply_and(fe, ge)?,
             level: std::cmp::min(fnode.level, gnode.level),
         };
-        let res = self.unique_table_get_or_insert(node)?;
+        let res = self.reduce(node)?;
 
         self.apply_and_cache.insert(key, res);
 
@@ -171,7 +174,7 @@ impl Manager {
             e: self.apply_not(fnode.e)?,
             level: fnode.level,
         };
-        let res = self.unique_table_get_or_insert(node)?;
+        let res = self.reduce(node)?;
 
         self.apply_not_cache.insert(f, res);
 
