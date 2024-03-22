@@ -89,7 +89,10 @@ impl Manager {
         Self::default()
     }
 
-    fn unique_table_get_or_insert(&mut self, node: Node) -> Edge {
+    fn reduce(&mut self, node: Node) -> Edge {
+        if node.t == node.e {
+            return node.t;
+        }
         Edge::Inner(match self.unique_table.entry(node.clone()) {
             Entry::Occupied(entry) => entry.get().clone(),
             Entry::Vacant(entry) => entry.insert(Rc::new(node)).clone(),
@@ -97,7 +100,7 @@ impl Manager {
     }
 
     pub fn get_var(&mut self, level: u32) -> Edge {
-        self.unique_table_get_or_insert(Node {
+        self.reduce(Node {
             t: Edge::Terminal(true),
             e: Edge::Terminal(false),
             level,
@@ -148,7 +151,7 @@ impl Manager {
             e: self.apply_and(fe, ge),
             level: std::cmp::min(fnode.level, gnode.level),
         };
-        let res = self.unique_table_get_or_insert(node);
+        let res = self.reduce(node);
 
         self.apply_and_cache.insert(key, res.clone());
 
@@ -170,7 +173,7 @@ impl Manager {
             e: self.apply_not(&fnode.e),
             level: fnode.level,
         };
-        let res = self.unique_table_get_or_insert(node);
+        let res = self.reduce(node);
 
         self.apply_not_cache.insert(f.clone(), res.clone());
 
