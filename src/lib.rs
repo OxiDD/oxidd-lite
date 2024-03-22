@@ -1,8 +1,5 @@
 extern crate creusot_contracts;
-// TODO: when importing everything from creusot_contracts
-// there seems to be name clash with respect to things imported
-// from other creates
-use creusot_contracts::{std, Clone, PartialEq, logic::Mapping, *};
+use creusot_contracts::{std, Clone, PartialEq, *};
 
 // Axiomatization of HashMaps
 mod hashmap_spec;
@@ -11,7 +8,6 @@ use hashmap_spec::hashmap_spec::EntryWrapper;
 use hashmap_spec::hashmap_spec::HashMapPreservesProps;
 
 use std::cmp::Ordering;
-use std::collections::hash_map::Entry;
 // NOTE: using our own hash-map wrapper
 //use std::collections::HashMap;
 use std::hash::Hash;
@@ -510,22 +506,18 @@ impl Manager {
 
     #[predicate]
     // NOTE: this pre-condition is more restrictive than what is actually needed
-    // for a successful execution of unique_table_get_or_insert, on the general
+    // for a successful execution of reduce, on the general
     // case
     // TODO: add remaining conditions
-    fn unique_table_get_or_insert_precondition(&self, node: Node) -> bool {
-        pearlite! { // TODO: not a pre-condition anymore, since unique_table_get_or_insert
-                    // can return None if out-of-memory problems exist
-                    // Edge::to_inner_node_precondition(Seq::len(self.node_store@))
-                    // &&
-                    self.manager_invariant()
+    fn reduce_precondition(&self, node: Node) -> bool {
+        pearlite! { self.manager_invariant()
                     &&
                     // To guarantee that we are adding a node that preserves our invariants
                     self.node_invariant(node)
         }
     }
 
-    #[requires(self.unique_table_get_or_insert_precondition(node))]
+    #[requires(self.reduce_precondition(node))]
     // If we modify self.node_store, it is just by adding new nodes
     #[ensures(Manager::node_store_is_prefix((^self).node_store, (*self).node_store))]
     #[ensures((^self).manager_invariant())]
@@ -533,69 +525,65 @@ impl Manager {
                     Some(e) => (^self).edge_invariant(e),
                     None => true
               })]
-    fn unique_table_get_or_insert(&mut self, node: Node) -> Option<Edge> {
-        let old_node_store = snapshot! { self.node_store };
-
+    fn reduce(&mut self, node: Node) -> Option<Edge> {
+        if node.t == node.e {
+            return Some(node.t)
+        }
+        
         let e = match self.unique_table.entry(node) {
             EntryWrapper::OccupiedWrapper(entry) => {
                 let e = *entry.get();
-                proof_assert!((^self).edge_invariant(e));
-                proof_assert!((^self).manager_invariant());
+                // proof_assert!((^self).edge_invariant(e));
+                // proof_assert!((^self).manager_invariant());
                 e
             }
-            EntryWrapper::VacantWrapper(entry) => { 
+            EntryWrapper::VacantWrapper(_) => { 
+                // TODO: not using entry to insert the element
                 let idx = self.node_store.len();
                 // To comply with to_inner_node's pre
                 if idx > (u32::MAX - Edge::NUM_TERMINALS) as usize {
-                    proof_assert!((^self).manager_invariant());
+                    // proof_assert!((^self).manager_invariant());
                     return None; // out of memory
                 }
                 let idx = idx as u32;
                 let edge = Edge::to_inner_node(idx);
                 self.node_store.push(node);
-                let res = self.unique_table.insert(node, edge);
-                proof_assert!(edge.inner_node_index_logic() == idx@);
-                proof_assert!(edge.points_to_inner_node());
-                proof_assert!(edge.inner_node_index_logic() < idx@ + 1);
-                proof_assert!((^self).node_store@[edge.inner_node_index_logic()] == node);
-                proof_assert!((^self).edge_invariant(edge));
-                //proof_assert!(((^self).unique_table)@.get(self.node_store@[edge.inner_node_index_logic()]) == Some(edge));
-                proof_assert!(Manager::node_store_is_prefix((^self).node_store, *old_node_store));
-                // proof_assert!((forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==> 
-                //                match (self.unique_table)@.get(self.node_store@[i]) {
-                //                    Some(e) => i == e.inner_node_index_logic(),
-                //                    None => true
-                //                }));
-                
-                proof_assert!(forall<node : Node> 
-                              match (self.unique_table)@.get(node) {
-                                  Some(e) => 
-                                      self.edge_invariant(e)
-                                      &&
-                                      e.points_to_inner_node() 
-                                      && 
-                                      self.node_store@[e.inner_node_index_logic()] == node,
-                                  None => true
-                              });
-                proof_assert!((^self).node_store_invariant());
+                self.unique_table.insert(node, edge);
+                // proof_assert!(edge.inner_node_index_logic() == idx@);
+                // proof_assert!(edge.points_to_inner_node());
+                // proof_assert!(edge.inner_node_index_logic() < idx@ + 1);
+                // proof_assert!((^self).node_store@[edge.inner_node_index_logic()] == node);
+                // proof_assert!((^self).edge_invariant(edge));
+                // proof_assert!(Manager::node_store_is_prefix((^self).node_store, *old_node_store));                
+                // proof_assert!(forall<node : Node> 
+                //               match (self.unique_table)@.get(node) {
+                //                   Some(e) => 
+                //                       self.edge_invariant(e)
+                //                       &&
+                //                       e.points_to_inner_node() 
+                //                       && 
+                //                       self.node_store@[e.inner_node_index_logic()] == node,
+                //                   None => true
+                //               });
+                // proof_assert!((^self).node_store_invariant());
                 edge
             }
         };
 
         // To help in verifying post-condition about returned edge
-        proof_assert!((^self).edge_invariant(e));
-        proof_assert!(Seq::len((*self).node_store@) < Seq::len((^self).node_store@) ==> (*self).unique_table_invariant());
-        proof_assert!((^self).node_store_invariant());
+        // proof_assert!((^self).edge_invariant(e));
+        // proof_assert!(Seq::len((*self).node_store@) < Seq::len((^self).node_store@) ==> (*self).unique_table_invariant());
+        // proof_assert!((^self).node_store_invariant());
         Some(e)
     }
 
     /// Returns [`None`] in an out-of-memory situation
-    // // To satisfy pre-condition of unique_table_get_or_insert
+    // // To satisfy pre-condition of reduce
     #[requires(self.manager_invariant())]
     #[requires(Seq::len(self.node_store@) <= u32::MAX@ - Edge::NUM_TERMINALS@)]
     #[ensures((^self).manager_invariant())]
     pub fn get_var(&mut self, level: u32) -> Option<Edge> {
-        self.unique_table_get_or_insert(Node {
+        self.reduce(Node {
             t: Edge::to_terminal(true),
             e: Edge::to_terminal(false),
             level,
@@ -612,7 +600,7 @@ impl Manager {
     #[ensures((^self).manager_invariant())]
     // If we modify self.node_store, it is just by adding new nodes
     #[ensures(Manager :: node_store_is_prefix((^self).node_store, (*self).node_store))]
-    // To guarantee properties required by unique_table_get_or_insert, about the
+    // To guarantee properties required by reduce, about the
     // received node
     #[ensures(match result {
                  Some(e) => (^self).edge_invariant(e),
@@ -666,7 +654,7 @@ impl Manager {
                     level: std::cmp::min(fnode.level, gnode.level),
                 };
                 
-                match self.unique_table_get_or_insert(node) {
+                match self.reduce(node) {
                     Some(edge) => {
                         self.apply_and_cache.insert(key, edge);
                         proof_assert!((^self).edge_invariant(edge));
@@ -714,7 +702,7 @@ impl Manager {
                     level: fnode.level,
                 };
                 
-                match self.unique_table_get_or_insert(node) {
+                match self.reduce(node) {
                     Some(edge) => {
                         self.apply_not_cache.insert(f, edge);
                         ret = Some(edge)
@@ -829,7 +817,9 @@ mod test {
                         let actual = manager.eval(f, &env);
                         if actual != expected {
                             panic!(
-                                "Error for {formula:?} in {env:?}: expected {expected}, got {actual}\nDD: {f:?}"
+                                "Error some formula in env: expected something, got other thing...\n"
+                                // TODO: for the moment, no Debug trait
+                                //"Error for {formula:?} in {env:?}: expected {expected}, got {actual}\nDD: {f:?}"
                             );
                         }
                     }

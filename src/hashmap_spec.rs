@@ -6,7 +6,7 @@ extern crate creusot_contracts;
 pub mod hashmap_spec {
     // TODO: why do I need to declare this import in this level, instead of 
     // being able to declare them once and for all, outside of this module?
-    use creusot_contracts::{logic::Mapping, predicate, open, logic, trusted, pearlite, ensures, ShallowModel};
+    use creusot_contracts::{logic::Mapping, predicate, logic, trusted, ensures, open, pearlite, ShallowModel};
 
     use ::std::collections::HashMap;
     use ::std::hash::Hash;
