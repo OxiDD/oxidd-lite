@@ -1,9 +1,16 @@
+//! Simple implementation of binary decision diagrams (BDDs) using an
+//! index-based edge representation
+
+#![warn(missing_docs)]
+
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::hash::Hash;
 
 // spell-checker:ignore fnode,gnode
 
+/// Edge pointing to an inner or terminal node
+//
 // Note: We only need some arbitrary total ordering on `Edge`s. This avoids
 // having both f ∧ g and g ∧ f separately in the apply cache.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -12,14 +19,18 @@ pub struct Edge(u32);
 impl Edge {
     const NUM_TERMINALS: u32 = 2;
 
+    /// Get an edge pointing to the given terminal node (`value`)
     pub fn to_terminal(value: bool) -> Self {
         Self(value as u32)
     }
 
+    /// Get an edge pointing to the inner node at `index`
     fn to_inner_node(index: u32) -> Self {
         Self(index + Self::NUM_TERMINALS)
     }
 
+    /// Get the terminal node value of this edge or [`None`] if this edge points
+    /// to an inner node
     pub fn terminal_value(self) -> Option<bool> {
         if self.0 == 0 {
             Some(false)
@@ -30,6 +41,7 @@ impl Edge {
         }
     }
 
+    /// Get the inner node index of this edge
     fn inner_node_index(self) -> Option<u32> {
         if self.0 >= 2 {
             Some(self.0 - Self::NUM_TERMINALS)
@@ -39,6 +51,7 @@ impl Edge {
     }
 }
 
+/// Inner node of the decision diagram
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Node {
     /// Level number, must be less than `t.level` and `e.level` (given that
@@ -50,6 +63,7 @@ pub struct Node {
     e: Edge,
 }
 
+/// Manager responsible for storing nodes and ensuring their uniqueness
 #[derive(Default, Debug)]
 pub struct Manager {
     node_store: Vec<Node>,
@@ -59,31 +73,42 @@ pub struct Manager {
 }
 
 impl Manager {
+    /// Create a new `Manager`
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Panics if self points to
+    /// Get the inner node for edge `f`
+    ///
+    /// `f` must belong to this manager, otherwise the `get_node()` might panic.
+    /// Also, `get_node` will panic if `f` points to a terminal node.
     pub fn get_node(&self, f: Edge) -> Node {
         self.node_store[f.inner_node_index().unwrap() as usize]
     }
 
-    pub fn eval(&self, f: Edge, env: &[bool]) -> bool {
+    /// Evaluate the Boolean function represented by `f` with the given
+    /// `valuation`. If `valuation[i]` is true, then the variable at level `i`
+    /// is set to `true`, otherwise it is `false`.
+    pub fn eval(&self, f: Edge, valuation: &[bool]) -> bool {
         if let Some(v) = f.terminal_value() {
             v
         } else {
             let node = self.get_node(f);
             self.eval(
-                if env[node.level as usize] {
+                if valuation[node.level as usize] {
                     node.t
                 } else {
                     node.e
                 },
-                env,
+                valuation,
             )
         }
     }
 
+    /// Apply the BDD reduction rules to `node` and return an `Edge` pointing to
+    /// the resulting node or [`None`] in case of an out-of-memory situation
+    ///
+    /// The outgoing edges of `node` must belong to this manager.
     fn reduce(&mut self, node: Node) -> Option<Edge> {
         if node.t == node.e {
             return Some(node.t);
@@ -103,6 +128,8 @@ impl Manager {
         })
     }
 
+    /// Get the Boolean function for the variable at level `level`
+    ///
     /// Returns [`None`] in an out-of-memory situation
     pub fn get_var(&mut self, level: u32) -> Option<Edge> {
         self.reduce(Node {
@@ -112,7 +139,12 @@ impl Manager {
         })
     }
 
-    /// Returns [`None`] in an out-of-memory situation
+    /// Compute the conjunction of the Boolean functions represented by `f` and
+    /// `g`
+    ///
+    /// Returns [`None`] in an out-of-memory situation.
+    ///
+    /// `f` and `g` must belong to this manager.
     pub fn apply_and(&mut self, f: Edge, g: Edge) -> Option<Edge> {
         if f == g {
             return Some(f);
@@ -124,8 +156,6 @@ impl Manager {
             (_, Some(true)) => return Some(f),
             (None, None) => {}
         }
-        let fnode = self.get_node(f);
-        let gnode = self.get_node(g);
 
         // ∧ is commutative, so we use a canonical form of the key to increase
         // cache efficiency
@@ -134,6 +164,8 @@ impl Manager {
             return Some(*res);
         }
 
+        let fnode = self.get_node(f);
+        let gnode = self.get_node(g);
         // cofactors with respect to the top variable
         let (ft, fe) = if fnode.level <= gnode.level {
             (fnode.t, fnode.e)
@@ -158,17 +190,21 @@ impl Manager {
         Some(res)
     }
 
-    /// Returns [`None`] in an out-of-memory situation
+    /// Compute the negation of the Boolean functions represented by `f`
+    ///
+    /// Returns [`None`] in an out-of-memory situation.
+    ///
+    /// `f` must belong to this manager.
     pub fn apply_not(&mut self, f: Edge) -> Option<Edge> {
-        let fnode = match f.terminal_value() {
-            Some(t) => return Some(Edge::to_terminal(!t)),
-            None => self.get_node(f),
-        };
+        if let Some(t) = f.terminal_value() {
+            return Some(Edge::to_terminal(!t));
+        }
 
         if let Some(res) = self.apply_not_cache.get(&f) {
             return Some(*res);
         }
 
+        let fnode = self.get_node(f);
         let node = Node {
             t: self.apply_not(fnode.t)?,
             e: self.apply_not(fnode.e)?,
