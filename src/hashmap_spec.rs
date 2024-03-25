@@ -21,6 +21,7 @@ pub mod hashmap_spec {
     impl<'a, K : Default, V : Default> OccupiedEntryWrapper<'a, K, V> {
         // NOTE: if we do not implement a wrapper around OccupiedEntry,
         // self.get() would make Creusot to produce an impossible goal (false)
+        #[trusted]
         #[ensures(*result == self@.1)]
         pub fn get(&self) -> &V {
             self.0.get()
@@ -160,16 +161,5 @@ pub mod hashmap_spec {
         pub fn insert(&mut self, k: K, v: V) -> Option<V> {
             self.0.insert(k, v)
         }
-    }
-
-    // TODO: experiment!
-    // Trait that describe HashMaps whose method satisfy some
-    // given predicates
-    pub trait HashMapPreservesProps<K : Eq + PartialEq + Hash, V> {
-
-        // Predicate that should be preserved by the entry method
-        #[predicate]
-        // TODO: add value
-        fn entry_predicate(self, key : K) -> bool;
     }
 }

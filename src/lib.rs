@@ -5,7 +5,6 @@ use creusot_contracts::{std, Clone, PartialEq, *};
 mod hashmap_spec;
 use hashmap_spec::hashmap_spec::HashMapWrapper;
 use hashmap_spec::hashmap_spec::EntryWrapper;
-use hashmap_spec::hashmap_spec::HashMapPreservesProps;
 
 use std::cmp::Ordering;
 // NOTE: using our own hash-map wrapper
@@ -36,12 +35,14 @@ impl ShallowModel for Edge {
 }
 
 impl PartialOrd for Edge {
+    #[ensures(result == Some(self.cmp_log(*other)))]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for Edge {
+    #[ensures(result == self.cmp_log(*other))]
     fn cmp(&self, other: &Self) -> Ordering {
         match (self.0, other.0) {
             (a, b) if a < b => Ordering::Less,
@@ -341,21 +342,10 @@ pub struct Manager {
     apply_and_cache: HashMapWrapper<(Edge, Edge), Edge>,
 }
 
-impl HashMapPreservesProps<Node, Edge> for HashMapWrapper<Node, Edge> {
-
-        // Predicate that should be preserved by the entry method
-        #[open]
-        #[predicate]
-        #[trusted]
-        fn entry_predicate(self, key : Node) -> bool{
-            absurd
-        }
-    }
-
 impl creusot_contracts::Default for Manager {
     #[predicate]
     #[open]
-    #[requires(self.manager_invariant())]
+    //#[requires(self.manager_invariant())]
     fn is_default(self) -> bool {
         // NOTE: if self.manager_invariant(), we can reduce
         // the predicate to just this
