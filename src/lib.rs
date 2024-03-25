@@ -65,6 +65,12 @@ impl Edge {
     const NUM_TERMINALS: u32 = 2;
 
     #[ensures(!result.points_to_inner_node())]
+    // To help in proving assertions that depend on the
+    // injectivity of to_terminal (NOTE: weaker prop. than injectivity) 
+    #[ensures(match result {
+                  Edge(e) => if e@ == 0 {value == false}
+                             else {value == true}
+              })]
     pub fn to_terminal(value: bool) -> Self {
         Self(value as u32)
     }
@@ -125,6 +131,14 @@ impl Edge {
         pearlite! { self.0@ - Self::NUM_TERMINALS@ }
     }
 
+        // Edge points to an existing node
+    #[predicate]
+    fn edge_invariant (self, manager : &Manager) -> bool {
+        pearlite! { 
+            self.points_to_inner_node() ==>
+                self.inner_node_index_logic() < Seq::len(manager.node_store@)
+        }
+    }
 }
 
 // Creusot requirements:
@@ -264,6 +278,22 @@ pub struct Node {
     e: Edge,
 }
 
+impl Node {
+    // For spec. purposes
+    // Sound node, with respect to a given instance of Manager
+    #[predicate]
+    fn node_invariant (self, manager : &Manager) -> bool {
+        pearlite! { self.t.edge_invariant(manager) 
+                    && 
+                    self.e.edge_invariant(manager)
+                    // TODO: see comments in apply_and about
+                    // guaranteeing this property
+                    // &&
+                    // self.t != self.e
+        }
+    }
+
+}
 // Creusot requirement: DeepModel for NodeWrapper
 // From creusot's source:
 // "The deep model corresponds to the model used for specifying
@@ -363,6 +393,8 @@ impl Manager {
             self.unique_table_invariant()
             &&
             self.apply_and_cache_invariant()
+            &&
+            self.apply_not_cache_invariant()
             // TODO: it would be useful, though Creusot requires for me to
             // implement trait std::iter::ExactSizeIterator
             // &&
@@ -373,27 +405,18 @@ impl Manager {
     ///////////////////////////////////
     // Predicates about self.unique_table
     ///////////////////////////////////
-    // Edge points to an existing node
-    #[predicate]
-    fn edge_invariant (&self, edge : Edge) -> bool {
-        pearlite! { 
-            edge.points_to_inner_node() ==>
-                edge.inner_node_index_logic() < Seq::len(self.node_store@)
-        }
-    }
-
     // Every edge satisfies edge_invariant
     // TODO: would it help quantify only over the keys of the hash?
     #[predicate]
-    fn unique_table_invariant(&self) -> bool {
+    fn unique_table_invariant(self) -> bool {
         pearlite! {
             (forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==> 
-             exists<e : Edge> (self.unique_table)@.get(self.node_store@[i]) == Some(e))
-            &&
-            forall<node : Node>
-            forall<e : Edge> 
+              exists<e : Edge> (self.unique_table)@.get(self.node_store@[i]) == Some(e))
+             &&
+             forall<node : Node>
+              forall<e : Edge> 
                 (self.unique_table)@.get(node) == Some(e) ==>
-                self.edge_invariant(e)
+                e.edge_invariant(&self)
                 &&
                 e.points_to_inner_node() 
                 && 
@@ -404,14 +427,6 @@ impl Manager {
     /////////////////////////////////////////////////////
     // Predicates about self.node_store and related stuff
     /////////////////////////////////////////////////////
-    
-    // For spec. purposes
-    // Sound node, with respect to the actual instance of Manager
-    #[predicate]
-    fn node_invariant (self, node : Node) -> bool {
-        pearlite! { self.edge_invariant(node.t) && self.edge_invariant(node.e) }
-    }
-
     // We can still store at least on element in self.node_store
     // TODO: see if we really need to separate it from the predicate 
     // Seq::len(self.node_store@) <= u32::MAX@ - Edge::NUM_TERMINALS@
@@ -427,7 +442,7 @@ impl Manager {
             forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==>
                 // Every edge that does not point to a terminal, points to an 
                 // existing node
-                self.node_invariant(self.node_store[i])
+                self.node_store[i].node_invariant(&self)
         }
     }
 
@@ -449,7 +464,22 @@ impl Manager {
         pearlite! {
             forall<pair : (Edge, Edge)> 
                 match self.apply_and_cache@.get(pair) {
-                    Some(edge) => self.edge_invariant(edge),
+                    Some(edge) => edge.edge_invariant(&self),
+                    None => true
+                }
+        }
+    }
+    
+    /////////////////////////////////////////////////////
+    // Predicates about self.apply_not_cache
+    /////////////////////////////////////////////////////
+    // Invariant about apply_not_cache
+        #[predicate]
+    fn apply_not_cache_invariant(self) -> bool {
+        pearlite! {
+            forall<key : Edge> 
+                match self.apply_not_cache@.get(key) {
+                    Some(edge) => edge.edge_invariant(&self),
                     None => true
                 }
         }
@@ -457,12 +487,12 @@ impl Manager {
 
 
     /// Panics if self points to
+    // TODO: check if this is needed
+    #[requires(self.manager_invariant())]
+    #[ensures(result.node_invariant(self))]
     // To avoid inner_node_index() == None
-    // TODO: abstract these conditions that expose implementation details into 
-    // predicates, and use the predicates for spec. purposes
     #[requires(f.points_to_inner_node())]
     // To guarantee index within bounds
-    // TODO: ugly, here I am speaking about implementation details
     #[requires(f.inner_node_index_logic() < Seq::len(self.node_store@))]
     #[ensures(result == self.node_store[f.inner_node_index_logic()])]
     pub fn get_node(&self, f: Edge) -> Node {
@@ -472,11 +502,7 @@ impl Manager {
     // Cannot guarantee panics absence if we eval over an arbitrary Manager
     #[requires(self.manager_invariant())]
     // To satisfy get_node's precondition
-    #[requires(f.points_to_inner_node() ==> 
-               f.inner_node_index_logic() < Seq::len(self.node_store@))]
-    // To preserve the previous property on recursive calls
-    #[requires(forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==>
-                                  self.node_invariant(self.node_store[i]))]
+    #[requires(f.edge_invariant(&self))]
     // To guarantee index of env, within bounds
     #[requires(f.points_to_inner_node() ==> 
                self.node_store[f.inner_node_index_logic()].level@ < Seq::len(env@))]
@@ -513,7 +539,7 @@ impl Manager {
         pearlite! { self.manager_invariant()
                     &&
                     // To guarantee that we are adding a node that preserves our invariants
-                    self.node_invariant(node)
+                    node.node_invariant(&self)
         }
     }
 
@@ -522,7 +548,7 @@ impl Manager {
     #[ensures(Manager::node_store_is_prefix((^self).node_store, (*self).node_store))]
     #[ensures((^self).manager_invariant())]
     #[ensures(match result {
-                    Some(e) => (^self).edge_invariant(e),
+                    Some(e) => e.edge_invariant(&^self),
                     None => true
               })]
     fn reduce(&mut self, node: Node) -> Option<Edge> {
@@ -533,8 +559,6 @@ impl Manager {
         let e = match self.unique_table.entry(node) {
             EntryWrapper::OccupiedWrapper(entry) => {
                 let e = *entry.get();
-                // proof_assert!((^self).edge_invariant(e));
-                // proof_assert!((^self).manager_invariant());
                 e
             }
             EntryWrapper::VacantWrapper(_) => { 
@@ -542,38 +566,16 @@ impl Manager {
                 let idx = self.node_store.len();
                 // To comply with to_inner_node's pre
                 if idx > (u32::MAX - Edge::NUM_TERMINALS) as usize {
-                    // proof_assert!((^self).manager_invariant());
                     return None; // out of memory
                 }
                 let idx = idx as u32;
                 let edge = Edge::to_inner_node(idx);
                 self.node_store.push(node);
                 self.unique_table.insert(node, edge);
-                // proof_assert!(edge.inner_node_index_logic() == idx@);
-                // proof_assert!(edge.points_to_inner_node());
-                // proof_assert!(edge.inner_node_index_logic() < idx@ + 1);
-                // proof_assert!((^self).node_store@[edge.inner_node_index_logic()] == node);
-                // proof_assert!((^self).edge_invariant(edge));
-                // proof_assert!(Manager::node_store_is_prefix((^self).node_store, *old_node_store));                
-                // proof_assert!(forall<node : Node> 
-                //               match (self.unique_table)@.get(node) {
-                //                   Some(e) => 
-                //                       self.edge_invariant(e)
-                //                       &&
-                //                       e.points_to_inner_node() 
-                //                       && 
-                //                       self.node_store@[e.inner_node_index_logic()] == node,
-                //                   None => true
-                //               });
-                // proof_assert!((^self).node_store_invariant());
                 edge
             }
         };
 
-        // To help in verifying post-condition about returned edge
-        // proof_assert!((^self).edge_invariant(e));
-        // proof_assert!(Seq::len((*self).node_store@) < Seq::len((^self).node_store@) ==> (*self).unique_table_invariant());
-        // proof_assert!((^self).node_store_invariant());
         Some(e)
     }
 
@@ -594,8 +596,8 @@ impl Manager {
     // We are working over a sound manager (sound node_store, etc)
     #[requires(self.manager_invariant())]
     // get_node's pre-condition
-    #[requires(f.points_to_inner_node() ==> f.inner_node_index_logic() < Seq::len(self.node_store@))]
-    #[requires(g.points_to_inner_node() ==> g.inner_node_index_logic() < Seq::len(self.node_store@))]
+    #[requires(f.edge_invariant(&self))]
+    #[requires(g.edge_invariant(&self))]
     // The obtained manager preserves the invariant
     #[ensures((^self).manager_invariant())]
     // If we modify self.node_store, it is just by adding new nodes
@@ -603,7 +605,7 @@ impl Manager {
     // To guarantee properties required by reduce, about the
     // received node
     #[ensures(match result {
-                 Some(e) => (^self).edge_invariant(e),
+                 Some(e) => e.edge_invariant(&^self),
                  None => true
               })]
     pub fn apply_and(&mut self, f: Edge, g: Edge) -> Option<Edge> {
@@ -629,6 +631,8 @@ impl Manager {
         }
 
         // cofactors with respect to the top variable
+        // TODO: if fnode.level == gnode.level, we end up
+        // making a rec. call over the same parameters f and g?
         let (ft, fe) = if fnode.level <= gnode.level {
             (fnode.t, fnode.e)
         } else {
@@ -643,6 +647,9 @@ impl Manager {
 
         let ret;
 
+        // TODO: if ft, fe == f and gt, ge == g, we cannot
+        // guarantee that the edges in ft_and_gt and fe_and_ge
+        // are different, in order to satisfy Node invariant
         let ft_and_gt = self.apply_and(ft, gt);
         let fe_and_ge = self.apply_and(fe, ge);
 
@@ -657,8 +664,10 @@ impl Manager {
                 match self.reduce(node) {
                     Some(edge) => {
                         self.apply_and_cache.insert(key, edge);
-                        proof_assert!((^self).edge_invariant(edge));
-                        proof_assert!((^self).apply_and_cache_invariant());
+                        // TODO: check if, by adding these kind of asserts, we improve
+                        // performance
+                        // proof_assert!(edge.edge_invariant(&^self));
+                        // proof_assert!((^self).apply_and_cache_invariant());
                         ret = Some(edge)
                     }
 
@@ -673,15 +682,26 @@ impl Manager {
     }
 
     /// Returns [`None`] in an out-of-memory situation
+    // We are working over a sound Manager
+    #[requires(self.manager_invariant())]
     // get_node's pre-condition
-    #[requires(f.points_to_inner_node() ==> f.inner_node_index_logic() < Seq::len(self.node_store@))]
+    #[requires(f.edge_invariant(&self))]
     // To preserve pre-conditions on recursive calls
-    #[requires(forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==>
-                self.node_store[i].t.points_to_inner_node() ==> 
-                self.node_store[i].t.inner_node_index_logic() < Seq::len(self.node_store@))]
-    #[requires(forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==>
-                self.node_store[i].e.points_to_inner_node() ==> 
-                self.node_store[i].e.inner_node_index_logic() < Seq::len(self.node_store@))]
+    // #[requires(forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==>
+    //             self.node_store[i].t.points_to_inner_node() ==> 
+    //             self.node_store[i].t.inner_node_index_logic() < Seq::len(self.node_store@))]
+    // #[requires(forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==>
+    //             self.node_store[i].e.points_to_inner_node() ==> 
+    //             self.node_store[i].e.inner_node_index_logic() < Seq::len(self.node_store@))]
+    #[ensures((^self).manager_invariant())]
+    // If we modify self.node_store, it is just by adding new nodes
+    #[ensures(Manager :: node_store_is_prefix((^self).node_store, (*self).node_store))]
+    // To guarantee properties required by reduce, about the
+    // received node
+    #[ensures(match result {
+                 Some(e) => e.edge_invariant(&^self),
+                 None => true
+              })]
     pub fn apply_not(&mut self, f: Edge) -> Option<Edge> {
         let fnode = match f.terminal_value() {
             Some(t) => return Some(Edge::to_terminal(!t)),
@@ -693,7 +713,9 @@ impl Manager {
         }
 
         let ret;
-
+        
+        proof_assert!(fnode.t.edge_invariant(&self));
+        proof_assert!(fnode.e.edge_invariant(&self));
         match (self.apply_not(fnode.t), self.apply_not(fnode.e)) {
             (Some(t), Some(e)) => {
                 let node = Node {
@@ -702,6 +724,7 @@ impl Manager {
                     level: fnode.level,
                 };
                 
+                proof_assert!(node.node_invariant(self));
                 match self.reduce(node) {
                     Some(edge) => {
                         self.apply_not_cache.insert(f, edge);
