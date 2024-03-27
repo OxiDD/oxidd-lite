@@ -109,10 +109,15 @@ impl Manager {
     /// the resulting node or [`None`] in case of an out-of-memory situation
     ///
     /// The outgoing edges of `node` must belong to this manager.
-    fn reduce(&mut self, node: Node) -> Option<Edge> {
-        if node.t == node.e {
-            return Some(node.t);
+    fn reduce(&mut self, level: u32, then_edge: Edge, else_edge: Edge) -> Option<Edge> {
+        if then_edge == else_edge {
+            return Some(then_edge);
         }
+        let node = Node {
+            level,
+            t: then_edge,
+            e: else_edge,
+        };
         Some(match self.unique_table.entry(node) {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {
@@ -132,11 +137,7 @@ impl Manager {
     ///
     /// Returns [`None`] in an out-of-memory situation
     pub fn get_var(&mut self, level: u32) -> Option<Edge> {
-        self.reduce(Node {
-            t: Edge::to_terminal(true),
-            e: Edge::to_terminal(false),
-            level,
-        })
+        self.reduce(level, Edge::to_terminal(true), Edge::to_terminal(false))
     }
 
     /// Compute the conjunction of the Boolean functions represented by `f` and
@@ -178,12 +179,10 @@ impl Manager {
             (g, g)
         };
 
-        let node = Node {
-            t: self.apply_and(ft, gt)?,
-            e: self.apply_and(fe, ge)?,
-            level: std::cmp::min(fnode.level, gnode.level),
-        };
-        let res = self.reduce(node)?;
+        let level = std::cmp::min(fnode.level, gnode.level);
+        let then_edge = self.apply_and(ft, gt)?;
+        let else_edge = self.apply_and(fe, ge)?;
+        let res = self.reduce(level, then_edge, else_edge)?;
 
         self.apply_and_cache.insert(key, res);
 
@@ -205,12 +204,9 @@ impl Manager {
         }
 
         let fnode = self.get_node(f);
-        let node = Node {
-            t: self.apply_not(fnode.t)?,
-            e: self.apply_not(fnode.e)?,
-            level: fnode.level,
-        };
-        let res = self.reduce(node)?;
+        let then_edge = self.apply_not(fnode.t)?;
+        let else_edge = self.apply_not(fnode.e)?;
+        let res = self.reduce(fnode.level, then_edge, else_edge)?;
 
         self.apply_not_cache.insert(f, res);
 
