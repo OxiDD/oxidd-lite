@@ -43,7 +43,7 @@ impl BDT {
 
         match self {
             Terminal(_) => // TODO: Need to return some "neutral" of max
-                           u32::MAX,
+                           u32::MIN,
             Inner(_, _, _, max_level) => *max_level
         }
     }
