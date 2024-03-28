@@ -117,7 +117,7 @@ pub mod hashmap_spec {
                           entry@.0 == key
                           &&
                           *self == ^self, 
-                    EntryWrapper::VacantWrapper(entry) => 
+                    EntryWrapper::VacantWrapper(_) => 
                           self@.get(key) == None
                           &&
                           *self == ^self
