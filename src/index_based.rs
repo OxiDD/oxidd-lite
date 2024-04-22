@@ -65,6 +65,7 @@ impl creusot_contracts::Default for Edge {
 impl Edge {
 
     const NUM_TERMINALS: u32 = 2;
+    pub const LEAVES_LEVEL: u32 = u32::MAX;
 
     #[ensures(!result.points_to_inner_node())]
     // To help in proving assertions that depend on the
@@ -112,13 +113,7 @@ impl Edge {
     #[ensures(result == None ==> self.0@ >= 2)]
     // Expected correspondence with terminal_value_logic
     #[ensures(self.is_terminal_value() ==>
-              match result {
-                  Some(b) => 
-                      b == self.terminal_value_logic(),
-                  None =>
-                  // Impossible case
-                      false
-              })]
+              result == Some(self.terminal_value_logic()))]
     pub fn terminal_value(self) -> Option<bool> {
         if self.0 == 0 {
             Some(false)
@@ -131,6 +126,13 @@ impl Edge {
     
     #[predicate]
     #[open]
+    #[ensures(if result {
+                 self@ == Edge::to_terminal_logic(true)
+                 ||
+                 self@ == Edge::to_terminal_logic(false)
+              } else {
+                true
+              })]
     pub fn is_terminal_value(self) -> bool {
         pearlite! { self.0@ == 0 || self.0@ == 1 }
     }
@@ -185,7 +187,9 @@ impl Edge {
         pearlite! { self.0@ - Self::NUM_TERMINALS@ }
     }
 
-        // Edge points to an existing node
+    // Edge points to an existing node
+    // TODO: maybe this signature is misleading: the invariant does not depend on the
+    // whole manager but rather just on its node_store
     #[predicate]
     #[open]
     pub fn edge_invariant (self, manager : &Manager) -> bool {
@@ -365,18 +369,55 @@ impl Node {
     // Sound node, with respect to a given instance of Manager
     #[predicate]
     #[open]
+    // TODO: recursive node_invariant could not be required, since 
+    // node_store_invariant implies it holds for every possible node
+    // #[variant(Edge::LEAVES_LEVEL@ - self.level@)]
     pub fn node_invariant (self, manager : &Manager) -> bool {
-        pearlite! { self.t.edge_invariant(manager) 
+        pearlite! { // NOTE: LEAVES_LEVEL is reserved for leaves
+                    self.level < Edge::LEAVES_LEVEL
+                    &&
+                    self.t.edge_invariant(manager) 
                     && 
                     self.e.edge_invariant(manager)
                     &&
                     self.t != self.e
-                    // TODO: something to say about the following property?
-                    // &&
-                    // every node at level i can only have successor nodes at levels greater than i
+                    // Node at level i only points to nodes on a level higher 
+                    // than i
+                    // NODE: can't use get_node: it produces a mutual dependency (through 
+                    // manager_invariant) that creusot cannot solve
+                    &&
+                    (self.t.points_to_inner_node() ==>
+                     self.level < manager.node_store@[self.t.inner_node_index_logic()].level
+                     // TODO: this may not be actually required, since node_store_invariant
+                     // implies this
+                     // TODO: check where is the problem with this
+                     // &&
+                     // manager.node_store@[self.t.inner_node_index_logic()].node_invariant(manager)
+                    )
+                    &&
+                    (self.e.points_to_inner_node() ==>
+                     self.level < manager.node_store@[self.e.inner_node_index_logic()].level
+                     // TODO: this may not be actually required, since node_store_invariant
+                     // implies this
+                     // &&
+                     // manager.node_store@[self.e.inner_node_index_logic()].node_invariant(manager)
+                    )
+                    &&
+                    // If it is cached in unique_table, then every sub-graph is
+                    // also cached there (i.e., reduced)
+                    // TODO: useful?
+                    ((exists<e : Edge> (manager.unique_table)@.get(self) == Some(e)) ==>
+                     (self.t.points_to_inner_node() ==>
+                      (manager.unique_table)@.get(manager.node_store@[self.t.inner_node_index_logic()]) 
+                      == 
+                      Some(self.t))
+                    &&
+                    (self.e.points_to_inner_node() ==>
+                     (manager.unique_table)@.get(manager.node_store@[self.e.inner_node_index_logic()]) 
+                     == 
+                     Some(self.e)))
         }
     }
-
 }
 // Creusot requirement: DeepModel for NodeWrapper
 // From creusot's source:
@@ -448,6 +489,7 @@ impl ShallowModel for Manager {
 }
 
 impl Manager {
+    
     // TODO: check this
     // #[ensures(Manager::is_default(result))]
     // #[ensures(result.manager_invariant())]
@@ -491,6 +533,8 @@ impl Manager {
              forall<node : Node>
               forall<e : Edge> 
                 (self.unique_table)@.get(node) == Some(e) ==>
+                node.node_invariant(&self)
+                &&
                 e.edge_invariant(&self)
                 &&
                 e.points_to_inner_node() 
@@ -499,6 +543,15 @@ impl Manager {
         }
     }
     
+    #[predicate]
+    // The modified unique_table contains every pair from the original
+    fn unique_table_only_extended(original : HashMapWrapper<Node, Edge>, 
+                                  modified : HashMapWrapper<Node, Edge>) -> bool {
+        pearlite! { forall<node : Node> 
+                    original@.get(node) != None ==> 
+                    modified@.get(node) == original@.get(node) 
+        }
+    }
     /////////////////////////////////////////////////////
     // Predicates about self.node_store and related stuff
     /////////////////////////////////////////////////////
@@ -516,19 +569,71 @@ impl Manager {
     pub fn node_store_invariant(self) -> bool {
         pearlite! {
             forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==>
-                // Every edge that does not point to a terminal, points to an 
-                // existing node
                 self.node_store[i].node_invariant(&self)
+                &&
+                // TODO: is Creusot's Mapping theory helping to prove this?
+                // (with regard to manipulations of unique_table)
+                // Reduced nodes
+                forall<j : Int> 
+                0 <= j && j < Seq::len(self.node_store@) && j != i ==>
+                self.node_store[i].level != self.node_store[j].level
+                ||
+                self.node_store[i].t != self.node_store[j].t
+                ||
+                self.node_store[i].e != self.node_store[j].e
         }
     }
 
-    // Checks if self.node_store is a "prefix" of another_store
+    // Checks if prefix_store is a "prefix" of store
     #[predicate]
-    fn node_store_is_prefix(store : Vec<Node>, prefix_store : Vec<Node> ) -> bool {
+    #[open]
+    pub fn node_store_is_prefix(prefix_store : Vec<Node>, store : Vec<Node>) -> bool {
         pearlite! { Seq::len(prefix_store@) <= Seq::len(store@)
                     &&
                     forall<i : Int> 0 <= i && i < Seq::len(prefix_store@) ==>
-                                    store@[i] == prefix_store@[i] }
+                                    store@[i] == prefix_store@[i] 
+        }
+    }
+
+    // TODO: could it be useful to separate invariants into different categories,
+    // with regard to the properties that they enforce (functional correctness, 
+    // reducedness, etc)? It might help in improving the signatures of these 
+    // predicates, to make them more informative, and in performance-related issues
+    
+    // TODO: put this in another crate?
+    // Minimal theory about node_store_is_prefix
+    // NOTE: there is no need to specify a more general notion of "node_storeS that
+    // coincides on a given node"
+    #[logic]
+    #[open]
+    #[requires(manager_1.node_store_invariant() && manager_2.node_store_invariant())]
+    #[requires(Manager::node_store_is_prefix(manager_1.node_store, manager_2.node_store))]
+    #[requires(f.edge_invariant(&manager_1) && f.edge_invariant(&manager_2))]
+    #[variant(if f.points_to_inner_node() {
+                 Edge::LEAVES_LEVEL@ - manager_1.get_node_logic(f).level@
+              } else {
+                 // {! f.points_to_inner_node() }
+                 0
+    })]
+    #[ensures(forall<vars : _> 
+              manager_1.node_store_coincides_env(vars) 
+              && 
+              manager_2.node_store_coincides_env(vars)
+              &&
+              manager_1.node_level_lt_env(f, vars)
+              &&
+              manager_2.node_level_lt_env(f, vars)
+
+              ==>
+              
+              manager_1.eval_logic(f, vars) == manager_2.eval_logic(f, vars))]
+    pub fn lemma_node_store_is_prefix_same_value(manager_1 : Manager, manager_2 : Manager, f : Edge) {
+        // NOTE: this seems to be the way to introduce the required inductive hypothesis in the
+        // context; would require more documentation about it
+        if f.points_to_inner_node() {
+            Manager::lemma_node_store_is_prefix_same_value(manager_1, manager_2, manager_1.get_node_logic(f).t);
+            Manager::lemma_node_store_is_prefix_same_value(manager_1, manager_2, manager_1.get_node_logic(f).e)
+        }
     }
 
     /////////////////////////////////////////////////////
@@ -540,10 +645,38 @@ impl Manager {
     pub fn apply_and_cache_invariant(self) -> bool {
         pearlite! {
             forall<pair : (Edge, Edge)> 
-                match self.apply_and_cache@.get(pair) {
-                    Some(edge) => edge.edge_invariant(&self),
-                    None => true
-                }
+             match self.apply_and_cache@.get(pair) {
+                 Some(edge) => 
+                     edge.edge_invariant(&self)
+                     &&
+                     pair.0.edge_invariant(&self)
+                     &&
+                     pair.1.edge_invariant(&self)
+                     &&
+                     // apply_and-related invariant
+                     (self.node_or_leaf_level(edge) >= self.node_or_leaf_level(pair.0)
+                      ||
+                      self.node_or_leaf_level(edge) >= self.node_or_leaf_level(pair.1))
+                     // If something is cached in apply_and_cache, and is not
+                     // a terminal value, then it has already been reduced and cached 
+                     // in unique_table
+                     && 
+                     (edge.points_to_inner_node() ==> 
+                      self.unique_table@.get(self.node_store@[edge.inner_node_index_logic()]) == Some(edge)),
+                 None => true
+             }
+        }
+    }
+
+    // TODO: we could abstract these HashMap predicates into a generic one
+    #[predicate]
+    // The modified apply_and_cache contains every pair from the original
+    fn apply_and_cache_only_extended(original : HashMapWrapper<(Edge, Edge), Edge>, 
+                                     modified : HashMapWrapper<(Edge, Edge), Edge>) -> bool {
+        pearlite! { 
+            forall<pair : (Edge, Edge)> 
+                original@.get(pair) != None ==> 
+                modified@.get(pair) == original@.get(pair)
         }
     }
     
@@ -557,48 +690,133 @@ impl Manager {
         pearlite! {
             forall<key : Edge> 
                 match self.apply_not_cache@.get(key) {
-                    Some(edge) => edge.edge_invariant(&self),
+                    Some(edge) => 
+                        edge.edge_invariant(&self)
+                        &&
+                        key.edge_invariant(&self)
+                        &&
+                        // apply_not-related invariant
+                        self.node_or_leaf_level(edge) >= self.node_or_leaf_level(key)
+                        &&
+                        // If something is cached in apply_not_cache, then it has
+                        // already been reduced and cached in unique_table
+                        (edge.points_to_inner_node() ==> 
+                         self.unique_table@.get(self.node_store@[edge.inner_node_index_logic()])
+                         == 
+                         Some(edge))
+                        &&
+                        // Functional correctness
+                        // Pre-conditions of eval_logic
+                        (self.node_store_invariant() ==>
+                         forall<vars : _> 
+                         self.node_level_lt_env(key, vars)
+                         &&
+                         self.node_level_lt_env(edge, vars)
+                         &&
+                         self.node_store_coincides_env(vars)
+
+                         ==>
+
+                         self.eval_logic(edge, vars) == !self.eval_logic(key, vars)),
                     None => true
                 }
         }
     }
-
+    
+    /////////////////////////////////////////////////////
+    // Predicates about Edge
+    /////////////////////////////////////////////////////
+    // Level of the node to which the edge points to
+    // To avoid having to ask if edge points to an inner node
+    #[logic]
+    #[open]
+    // To guarantee index within bounds
+    #[requires(f.edge_invariant(&self))]
+    // TODO: check if creusot needs this or it is considers directly the
+    // pearlite spec in the function's body
+    #[ensures(result == if f.points_to_inner_node() {
+                           self.node_store@[f.inner_node_index_logic()].level
+                        } else {
+                           Edge::LEAVES_LEVEL
+                        })]
+    pub fn node_or_leaf_level(self, f : Edge) -> u32 {
+        pearlite! {
+            if f.points_to_inner_node() {
+                // Not using get_node_logic to avoid the need to enforce
+                // manager_invariant
+                self.node_store@[f.inner_node_index_logic()].level
+            } else {
+                // { ! f.points_to_inner_node() }
+                Edge::LEAVES_LEVEL
+            }
+        }
+    }
 
     /// Panics if self points to
-    // TODO: check if this is needed
-    #[requires(self.manager_invariant())]
-    #[ensures(result.node_invariant(self))]
+    //#[requires(self.manager_invariant())]
+    #[requires(self.node_store_invariant()
+               // TODO: why?
+               // &&
+               // self.unique_table_invariant()
+    )]
     // To avoid inner_node_index() == None
     #[requires(f.points_to_inner_node())]
     // To guarantee index within bounds
     #[requires(f.inner_node_index_logic() < Seq::len(self.node_store@))]
     #[ensures(result == self.node_store[f.inner_node_index_logic()])]
     #[ensures(result.node_invariant(self))]
+    #[ensures(result == self.get_node_logic(f))]
     pub fn get_node(&self, f: Edge) -> Node {
         self.node_store[f.inner_node_index().unwrap() as usize]
     }
-      
-    // Cannot guarantee panics absence if we eval over an arbitrary Manager
-    #[requires(self.manager_invariant())]
+
+    // For verification purposes
+    #[logic]
+    #[open]
+    // To guarantee result.node_invariant
+    // NOTE: it could be abstracted into a lemma, since
+    // node_store_invariant is not needed for the function to properly behave
+    #[requires(self.node_store_invariant())]
+    #[requires(f.points_to_inner_node())]
+    // To guarantee index within bounds
+    #[requires(f.inner_node_index_logic() < Seq::len(self.node_store@))]
+    #[ensures(result == self.node_store@[f.inner_node_index_logic()])]
+    #[ensures(result.node_invariant(self))]
+    pub fn get_node_logic(&self, f: Edge) -> Node {
+        pearlite! { self.node_store@[f.inner_node_index_logic()] }
+    }
+   
+    #[predicate]
+    #[open]
+    pub fn node_level_lt_env(self, f : Edge, env: &[bool]) -> bool {
+        pearlite! {
+            f.points_to_inner_node() ==> 
+                self.node_store[f.inner_node_index_logic()].level@ < Seq::len(env@)
+        }
+    }
+    
+    #[predicate]
+    #[open]
+    pub fn node_store_coincides_env(self, env: &[bool]) -> bool {
+        pearlite! {
+            forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==>
+                self.node_level_lt_env(self.node_store[i].t, env)
+                &&
+                self.node_level_lt_env(self.node_store[i].e, env)
+        }
+    }
+
+    // Cannot guarantee panics absence if we eval over an arbitrary node_store
+    #[requires(self.node_store_invariant())]
+    //#[requires(self.manager_invariant())]
     // To satisfy get_node's precondition
     #[requires(f.edge_invariant(&self))]
     // To guarantee index of env, within bounds
-    #[requires(f.points_to_inner_node() ==>
-               self.node_store[f.inner_node_index_logic()].level@ < Seq::len(env@))]
+    #[requires(self.node_level_lt_env(f, env))]
     // To preserve the previous property on recursive calls
-    #[requires(forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==>
-                self.node_store[i].t.points_to_inner_node() ==> 
-                self.node_store[self.node_store[i].t.inner_node_index_logic()].level@ < Seq::len(env@))]
-    #[requires(forall<i : Int> 0 <= i && i < Seq::len(self.node_store@) ==>
-                self.node_store[i].e.points_to_inner_node() ==> 
-                self.node_store[self.node_store[i].e.inner_node_index_logic()].level@ < Seq::len(env@))]
-    // TODO: see if it is possible to define an empty function whose spec.
-    // states this property
-    // Function correctness: 
-    // [| node_i |] = (x_i /\ [| node_i.t |]) \/ (not x_i /\ [| node_i.e |])
-    // We will reuse Creusot propositional fragment
-    // TODO: some way to define constants in pearlite?
-    // TODO: variant?
+    #[requires(self.node_store_coincides_env(env))]
+    // Part of function correctness:
+    #[ensures(result == self.eval_logic(f, env))]
     pub fn eval(&self, f: Edge, env: &[bool]) -> bool {
         if let Some(v) = f.terminal_value() {
             v
@@ -614,27 +832,195 @@ impl Manager {
             )
         }
     }
+    
+    #[logic]
+    // NOTE: From Creusot's docs:
+    // A body can only be visible in contexts where all the symbols used in the body are also visible.
+    // This means you cannot `#[open]` a body which refers to a `pub(crate)` symbol.
+    #[open]
+    // NOTE: can't enforce this invariant, since it produces a loop: apply_not_cache refers to eval_logic
+    //#[requires(self.manager_invariant())]
+    #[requires(self.node_store_invariant())]
+    // To satisfy get_node's precondition
+    #[requires(f.edge_invariant(&self))]
+    // To guarantee index of env, within bounds
+    #[requires(self.node_level_lt_env(f, env))]
+    // To guarantee index within bounds
+    #[requires(self.node_store_coincides_env(env))]
+    // TODO: ask why do we need to expose the definition of eval_logic, even though it is declared as
+    // open
+    #[ensures(!f.is_terminal_value() ==> 
+              result == self.eval_logic(
+                  if env@[self.get_node_logic(f).level@] {
+                      self.get_node_logic(f).t
+                  } else {
+                      self.get_node_logic(f).e
+                  },
+                  env))]
+    #[variant(if f.points_to_inner_node() {
+                 Seq::len(env@) - self.node_store[f.inner_node_index_logic()].level@
+              } else {
+                 // {! f.points_to_inner_node() }
+                 0
+              })]
+    pub fn eval_logic(&self, f: Edge, env: &[bool]) -> bool {
+        pearlite! {
+            if f.is_terminal_value() {
+                f.terminal_value_logic()
+            } else {
+                // NOTE: avoid using get_node_logic to prevent cyclic dependencies
+                // in logic predicates
+                let node = self.get_node_logic(f);
+                //let node = self.node_store[f.inner_node_index_logic()];
+                self.eval_logic(
+                    if env@[node.level@] {
+                        node.t
+                    } else {
+                        node.e
+                    },
+                    env,
+                )
+            }
+        }
+    }
+
+    // TODO: put this in another crate?
+    // Minimal theory about eval_logic
+    #[logic]
+    #[open]
+    #[requires(f.edge_invariant(&manager))]
+    #[ensures(f.is_terminal_value() ==>
+              forall<vars : _> 
+              manager.eval_logic(f, vars) == f.terminal_value_logic())]
+    pub fn lemma_eval_logic_terminal_leaf_constant_value(manager : Manager, f : Edge) {
+    }
+    
+    #[logic]
+    #[open]
+    #[requires(f.edge_invariant(&manager))]
+    #[ensures(!f.is_terminal_value() ==> 
+              forall<vars : _> 
+              manager.node_store_coincides_env(vars)
+              &&
+              manager.node_level_lt_env(f, vars) ==>
+
+              manager.eval_logic(f, vars) 
+              ==
+              manager.eval_logic(
+                  if vars@[manager.get_node_logic(f).level@] {
+                      manager.get_node_logic(f).t
+                  } else {
+                      manager.get_node_logic(f).e
+                  },
+                  vars))]
+    pub fn lemma_eval_logic_terminal_not_leaf(manager : Manager, f : Edge) {
+    }
 
     /// Apply the BDD reduction rules to `node` and return an `Edge` pointing to
     /// the resulting node or [`None`] in case of an out-of-memory situation
     ///
     /// The outgoing edges of `node` must belong to this manager.
-    #[requires(self.manager_invariant())]
+    // TODO: fix this, it shouldn't be required manager_invariant
+    //#[requires(self.manager_invariant())]
+    #[requires(self.node_store_invariant() && self.unique_table_invariant())]
+    #[requires(level < Edge::LEAVES_LEVEL)]
     #[requires(then_edge.edge_invariant(self) 
                && 
                else_edge.edge_invariant(self))]
+    #[requires(level < self.node_or_leaf_level(then_edge)
+               &&
+               level < self.node_or_leaf_level(else_edge))]
+    #[requires(then_edge.points_to_inner_node() ==>
+               self.node_store@[then_edge.inner_node_index_logic()].node_invariant(self))]
+    #[requires(else_edge.points_to_inner_node() ==>
+               self.node_store@[else_edge.inner_node_index_logic()].node_invariant(self))]
+    // If it applies, then and else sub-graphs are already reduced
+    #[requires(then_edge.points_to_inner_node() ==>
+               (self.unique_table)@.get(self.node_store@[then_edge.inner_node_index_logic()]) 
+               == 
+               Some(then_edge))]
+    #[requires(else_edge.points_to_inner_node() ==>
+               (self.unique_table)@.get(self.node_store@[else_edge.inner_node_index_logic()]) 
+               == 
+               Some(else_edge))]
     // If we modify self.node_store, it is just by adding new nodes
-    #[ensures(Manager::node_store_is_prefix((^self).node_store, (*self).node_store))]
-    #[ensures((^self).manager_invariant())]
+    #[ensures(Manager::node_store_is_prefix((*self).node_store, (^self).node_store)
+              &&
+              // We do not modify previous unique_table entries
+              Manager::unique_table_only_extended((*self).unique_table, (^self).unique_table))]
     #[ensures(match result {
-                    Some(e) => e.edge_invariant(&^self) 
-                               &&
-                               (exists<node : Node>
-                                e.points_to_inner_node()
-                                ==>
-                                (^self).node_store@[e.inner_node_index_logic()] == node),
-                    None => true
-              })]
+          Some(e) => 
+            e.edge_invariant(&^self)
+            &&
+            (^self).node_or_leaf_level(e) >= level
+            &&
+            (e.points_to_inner_node() ==>
+             (^self).unique_table@.get((^self).node_store@[e.inner_node_index_logic()]) 
+             == 
+             Some(e))
+            &&
+            (then_edge != else_edge ==> 
+             e.points_to_inner_node()
+             &&
+             (^self).node_store@[e.inner_node_index_logic()].level == level
+             &&
+             (^self).node_store@[e.inner_node_index_logic()].t == then_edge
+             &&
+             (^self).node_store@[e.inner_node_index_logic()].e == else_edge)
+            &&
+            (then_edge == else_edge ==> 
+             e == then_edge
+             &&
+             e == else_edge),
+        None => true
+      })]
+    #[ensures((^self).node_store_invariant() 
+              && 
+              (^self).unique_table_invariant()
+              &&
+              (^self).apply_and_cache == (*self).apply_and_cache
+              &&
+              (^self).apply_not_cache == (*self).apply_not_cache)]
+    // Functional correctness: reduce preserves expected semantics
+    #[ensures(match result {
+                    Some(e) => 
+                          then_edge != else_edge ==>
+                            // { e.points_to_inner_node() }
+                            forall<vars : _> 
+                              (^self).eval_logic((^self).node_store@[e.inner_node_index_logic()].t, vars)
+                              == 
+                              (^self).eval_logic(then_edge, vars)
+                              &&
+                              (^self).eval_logic((^self).node_store@[e.inner_node_index_logic()].e, vars)
+                              == 
+                              (^self).eval_logic(else_edge, vars),
+                     None => true})]
+    #[ensures(match result {
+                    Some(e) => 
+                          then_edge == else_edge ==>
+                            forall<vars : _> 
+                              (^self).eval_logic(e, vars)
+                              == 
+                              (^self).eval_logic(then_edge, vars)
+                              &&
+                              (^self).eval_logic(e, vars)
+                              == 
+                              (^self).eval_logic(else_edge, vars),
+                     None => true})]
+    // After reduce, the semantics of every node is preserved
+    #[ensures(
+        forall<edge : Edge> 
+            edge.edge_invariant(&(*self)) && 
+            edge.edge_invariant(&(^self)) ==>
+            forall<vars : _> 
+            (*self).node_store_coincides_env(vars) 
+            && 
+            (^self).node_store_coincides_env(vars)
+            &&
+            (*self).node_level_lt_env(edge, vars)
+            &&
+            (^self).node_level_lt_env(edge, vars) ==>
+            (*self).eval_logic(edge, vars) == (^self).eval_logic(edge, vars))]
     fn reduce(&mut self, level: u32, then_edge: Edge, else_edge: Edge) -> Option<Edge> {
         if then_edge == else_edge {
             return Some(then_edge);
@@ -649,7 +1035,9 @@ impl Manager {
         };
         
         let e = match self.unique_table.entry(node) {
-            EntryWrapper::OccupiedWrapper(entry) => *entry.get(),
+            EntryWrapper::OccupiedWrapper(entry) => {
+                *entry.get()
+            },
             EntryWrapper::VacantWrapper(_) => { 
                 // TODO: not using entry to insert the element
                 let idx = self.node_store.len();
@@ -659,10 +1047,11 @@ impl Manager {
                 }
                 let idx = idx as u32;
                 let edge = Edge::to_inner_node(idx);
-
-                self.node_store.push(node);                
+                self.node_store.push(node);
                 self.unique_table.insert(node, edge);
-                
+                // To strengthen the proof context
+                proof_assert!(Manager::lemma_node_store_is_prefix_same_value(*self, (^self), edge); 
+                              true);
                 edge
             }
         };
@@ -671,62 +1060,101 @@ impl Manager {
     }
 
     /// Returns [`None`] in an out-of-memory situation
+    #[requires(level < Edge::LEAVES_LEVEL)]
     // To satisfy pre-condition of reduce
-    #[requires(self.manager_invariant())]
+    //#[requires(self.manager_invariant())]
+    #[requires(self.node_store_invariant() && self.unique_table_invariant())]
     #[requires(Seq::len(self.node_store@) <= u32::MAX@ - Edge::NUM_TERMINALS@)]
-    #[ensures((^self).manager_invariant())]
+    #[ensures((^self).node_store_invariant() && (^self).unique_table_invariant())]
+    #[ensures((^self).apply_and_cache == self.apply_and_cache
+              &&
+              (^self).apply_not_cache == self.apply_not_cache)]
+    // #[ensures((^self).manager_invariant())]
     pub fn get_var(&mut self, level: u32) -> Option<Edge> {
         self.reduce(level, Edge::to_terminal(true), Edge::to_terminal(false))
     }
     
     /// Returns [`None`] in an out-of-memory situation
-    // We are working over a sound manager (sound node_store, etc)
-    #[requires(self.manager_invariant())]
+    // We are working over a sound node_store, apply_and_cache, etc)
+    #[requires(self.node_store_invariant() 
+               && 
+               self.unique_table_invariant()
+               &&
+               self.apply_and_cache_invariant())]
+    // #[requires(self.manager_invariant())]
     // get_node's pre-condition
     #[requires(f.edge_invariant(self))]
     #[requires(g.edge_invariant(self))]
-    // The obtained manager preserves the invariant
-    #[ensures((^self).manager_invariant())]
+    // We are working with already reduced sub-graphs
+    // then and else sub-graphs are already reduced
+    #[requires(f.points_to_inner_node() ==>
+               self.unique_table@.get(self.node_store@[f.inner_node_index_logic()]) == Some(f))]
+    #[requires(g.points_to_inner_node() ==>
+               self.unique_table@.get(self.node_store@[g.inner_node_index_logic()]) == Some(g))]
+    // We do not modify previous unique_table entries
+    #[ensures(Manager::unique_table_only_extended((*self).unique_table, (^self).unique_table))]
     // If we modify self.node_store, it is just by adding new nodes
-    #[ensures(Manager::node_store_is_prefix((^self).node_store, (*self).node_store))]
-    // To guarantee properties required by reduce, about the
-    // received node
+    #[ensures(Manager::node_store_is_prefix((*self).node_store, (^self).node_store))]
     #[ensures(match result {
-                 Some(e) => e.edge_invariant(&^self)
+                 Some(e) => // To guarantee properties required by reduce, about the
+                            // received node
+                            e.edge_invariant(&(^self))
                             &&
-                            (e.points_to_inner_node()
-                             ==>
-                             exists<node : Node> 
-                             (^self).node_store@[e.inner_node_index_logic()] == node),
+                            // The returned edge points to a reduced sub-graph
+                            (e.points_to_inner_node() ==>
+                             (^self).unique_table@.get((^self).node_store@[e.inner_node_index_logic()]) == Some(e)),
                  None => true
               })]
     // Part of functional correctness
     #[ensures(f == g ==> result == Some(f))]
     #[ensures(match result { 
                   Some(e) =>
-                   match f.is_terminal_value() {
-                      true =>
-                           match f.terminal_value_logic() {
-                               false => e@ == Edge::to_terminal_logic(false),
-                               true  => e == g,
-                           }
-                       false =>
-                           // { !f.is_terminal_value() }
-                           match g.is_terminal_value() {
-                               true =>
-                                   match g.terminal_value_logic() {
-                                       false => e@ == Edge::to_terminal_logic(false),
-                                       true  => e == f
-                                   },
-                               false =>
+                   if f == g {
+                       e == f
+                   } else {
+                       // { f != g }
+                       match f.is_terminal_value() {
+                           true =>
+                               match f.terminal_value_logic() {
+                                   false => e@ == Edge::to_terminal_logic(false),
+                                   true  => e == g,
+                               }
+                           false =>
+                               // { !f.is_terminal_value() }
+                               match g.is_terminal_value() {
+                                   true =>
+                                       match g.terminal_value_logic() {
+                                           false => e@ == Edge::to_terminal_logic(false),
+                                           true  => e == f
+                                       },
+                                   false =>
                                    // { !f.is_terminal_value() 
                                    //   && 
                                    //   !g.is_terminal_value() }
                                    true
-                           }
-                      },
+                               }
+                      }
+                   },
                   None => true
               })]
+    #[ensures(match result { 
+        Some(e) => 
+            (f.points_to_inner_node() && g.points_to_inner_node()) ==>
+            ((^self).node_or_leaf_level(e) >= (^self).node_or_leaf_level(f)
+            ||
+            (^self).node_or_leaf_level(e) >= (^self).node_or_leaf_level(g)),
+        None => true
+    })]
+    // If we modify apply_and_cache it is just by adding a new entry
+    // TODO: it is not helping at all
+    //#[ensures(Manager::apply_and_cache_only_extended((*self).apply_and_cache, (^self).apply_and_cache))]
+    #[ensures((^self).node_store_invariant() 
+               && 
+               (^self).unique_table_invariant()
+               &&
+               (^self).apply_and_cache_invariant())]
+    #[ensures((^self).apply_not_cache == self.apply_not_cache)]
+    //#[ensures((^self).manager_invariant())]
     pub fn apply_and(&mut self, f: Edge, g: Edge) -> Option<Edge> {
         if f == g {
             return Some(f);
@@ -742,7 +1170,6 @@ impl Manager {
         }
 
         proof_assert!(!f.is_terminal_value() && !g.is_terminal_value());
-
         let fnode = self.get_node(f);
 
         proof_assert!(fnode.e != fnode.t);
@@ -771,22 +1198,31 @@ impl Manager {
             (g, g)
         };
 
-        let level = std::cmp::min(fnode.level, gnode.level);
+        // TODO: Creusot is not capable of reasoning about std::cmp::min
+        // let level = std::cmp::min(fnode.level, gnode.level);
+        let level = if fnode.level <= gnode.level {
+                       fnode.level
+                    } else {
+                       gnode.level
+                    };
         let ft_and_gt = self.apply_and(ft, gt);
+
         let fe_and_ge = self.apply_and(fe, ge);
         let res;
-
         match (ft_and_gt, fe_and_ge) {
             (Some(then_edge), Some(else_edge)) => {
+                
                 match self.reduce(level, then_edge, else_edge) {
                     Some(edge) => {
+                        // TODO: this last update is causing the solver to delay
+                        // a lot the verification of (^self).manager_invariant()
                         self.apply_and_cache.insert(key, edge);
                         // TODO: check if, by adding these kind of asserts, we improve
                         // performance
                         // proof_assert!(edge.edge_invariant(&^self));
                         // proof_assert!((^self).apply_and_cache_invariant());
                         res = Some(edge)
-                    }
+                    },
                     None => res = None
                 }
             },
@@ -799,36 +1235,142 @@ impl Manager {
 
     /// Returns [`None`] in an out-of-memory situation
     // We are working over a sound Manager
-    #[requires(self.manager_invariant())]
+    #[requires(self.node_store_invariant() 
+               && 
+               self.unique_table_invariant()
+               &&
+               self.apply_not_cache_invariant())]
     // get_node's pre-condition
     #[requires(f.edge_invariant(&self))]
-    #[ensures((^self).manager_invariant())]
     // If we modify self.node_store, it is just by adding new nodes
-    #[ensures(Manager :: node_store_is_prefix((^self).node_store, (*self).node_store))]
+    #[ensures(Manager :: node_store_is_prefix((*self).node_store, (^self).node_store))]
     // To guarantee properties required by reduce, about the
     // received node
     #[ensures(match result {
-                 Some(e) => e.edge_invariant(&^self),
-                 None => true
+                    Some(e) => e.edge_invariant(&(^self))
+                               &&
+                               (^self).node_or_leaf_level(e) >= (^self).node_or_leaf_level(f)
+                               &&
+                               // The returned edge points to a cached reduced graph
+                               (e.points_to_inner_node() ==>
+                                (^self).unique_table@.get((^self).node_store@[e.inner_node_index_logic()]) 
+                                == 
+                                Some(e)),
+                    None => true
+               })]
+    #[ensures((^self).node_store_invariant() && (^self).unique_table_invariant())]
+    #[ensures((^self).apply_and_cache == self.apply_and_cache)]
+    // Functional correctness
+    // After apply_not, the semantics of every other node is preserved
+    #[ensures(
+        forall<edge : Edge> 
+            edge.edge_invariant(&(*self)) && 
+            edge.edge_invariant(&(^self)) ==>
+            forall<vars : _> 
+            (*self).node_store_coincides_env(vars) 
+            && 
+            (^self).node_store_coincides_env(vars)
+            &&
+            (*self).node_level_lt_env(edge, vars)
+            &&
+            (^self).node_level_lt_env(edge, vars) ==>
+            (*self).eval_logic(edge, vars) == (^self).eval_logic(edge, vars))]
+    #[variant(if !f.is_terminal_value() {
+                 Edge::LEAVES_LEVEL@ - self.get_node_logic(f).level@
+              } else {
+                 // {! f.points_to_inner_node() }
+                 0
               })]
+    // TODO: abstract this into a predicate
+    #[ensures(
+        match result { 
+            Some(e) =>
+                (forall<vars : _>
+                 (^self).node_level_lt_env(f, vars)
+                 &&
+                 (^self).node_level_lt_env(e, vars)
+                 &&
+                 (^self).node_store_coincides_env(vars) 
+                 
+                 ==>
+
+                 (^self).eval_logic(e, vars) == !(^self).eval_logic(f, vars)),
+
+            None => true})]
+    #[ensures((^self).apply_not_cache_invariant())]
     pub fn apply_not(&mut self, f: Edge) -> Option<Edge> {
         let fnode = match f.terminal_value() {
             Some(t) => return Some(Edge::to_terminal(!t)),
             None => self.get_node(f),
         };
 
+        proof_assert!(!f.is_terminal_value());
         if let Some(res) = self.apply_not_cache.get(&f) {
             return Some(*res);
         }
 
         let res;
         
+        
         match (self.apply_not(fnode.t), self.apply_not(fnode.e)) {
             (Some(then_edge), Some(else_edge)) => {
-                
+                // NOTE: do not remove this assertion, it is necessary to verify
+                // the same assertion, after call to reduce
+                proof_assert!(forall<vars : _>
+                              self.node_level_lt_env(fnode.t, vars)
+                              &&
+                              self.node_level_lt_env(then_edge, vars)
+                              &&
+                              self.node_store_coincides_env(vars) 
+                              
+                              ==>
+
+                              self.eval_logic(then_edge, vars) == !self.eval_logic(fnode.t, vars));
                 match self.reduce(fnode.level, then_edge, else_edge) {
                     Some(edge) => {
-                        self.apply_not_cache.insert(f, edge);
+                        // TODO: why apply_not_cache.insert(f, edge) invalidates 
+                        // the assertions about eval_logic made after it?
+                        //self.apply_not_cache.insert(f, edge);
+                        
+                        // To strengthen the proof context
+                        proof_assert!(forall<vars : _>
+                              self.node_level_lt_env(fnode.t, vars)
+                              &&
+                              self.node_level_lt_env(then_edge, vars)
+                              &&
+                              self.node_store_coincides_env(vars) 
+                              
+                              ==>
+
+                              self.eval_logic(then_edge, vars) == !self.eval_logic(fnode.t, vars));
+
+                        proof_assert!(forall<vars : _>
+                                      self.node_level_lt_env(fnode.e, vars)
+                                      &&
+                                      self.node_level_lt_env(else_edge, vars)
+                                      &&
+                                      self.node_store_coincides_env(vars) 
+                                      
+                                      ==>
+
+                                      self.eval_logic(else_edge, vars) == !self.eval_logic(fnode.e, vars));
+
+                        proof_assert!(then_edge != else_edge ==>
+                                      edge.points_to_inner_node() 
+                                      &&
+                                      self.node_store[edge.inner_node_index_logic()].level == fnode.level
+                                      &&
+                                      self.node_store[edge.inner_node_index_logic()].t == then_edge
+                                      &&
+                                      self.node_store[edge.inner_node_index_logic()].e == else_edge);
+
+                        proof_assert!(then_edge == else_edge ==>
+                                      edge == then_edge 
+                                      &&
+                                      edge == else_edge);
+
+                        proof_assert!(Manager::lemma_node_store_is_prefix_same_value(*self, ^self, edge);
+                                      true);
                         res = Some(edge)
                     },
                     
