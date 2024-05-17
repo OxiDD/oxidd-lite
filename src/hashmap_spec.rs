@@ -145,17 +145,12 @@ pub mod hashmap_spec {
         }
 
         #[trusted]
-        // insert only inserts (k, v)
+        // insert inserts (k, v)
         #[ensures((^self)@.get(k) == Some(v))]
         // Keys of (*self) are included in keys of (^self),
         // and the corresponding values are preserved, except for k
         #[ensures(forall<k2 : K> k2 != k ==> 
-                  (*self)@.get(k2) != None ==>
                   (*self)@.get(k2) == (^self)@.get(k2))]
-        // Keys of (^self) include keys of (^self) plus, perhaps, k
-        #[ensures(forall<k2 : K> k2 != k ==>
-                  (^self)@.get(k2) != None ==> 
-                  (^self)@.get(k2) == (*self)@.get(k2))]
         pub fn insert(&mut self, k: K, v: V) -> Option<V> {
             self.0.insert(k, v)
         }
