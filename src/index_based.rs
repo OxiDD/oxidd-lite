@@ -707,7 +707,7 @@ impl Manager {
                         &&
                         // Functional correctness
                         // node_store_invariant: pre-condition of eval_logic
-                        (self.node_store_invariant() ==>
+                        (//self.node_store_invariant() ==>
                          forall<vars : _> 
                          self.node_level_lt_env(key, vars)
                          &&
@@ -720,17 +720,6 @@ impl Manager {
                          self.eval_logic(edge, vars) == !self.eval_logic(key, vars)),
                     None => true
                 }
-        }
-    }
-
-    #[predicate]
-    // The modified apply_not_cache contains every pair from the original
-    fn apply_not_cache_only_extended(original : HashMapWrapper<Edge, Edge>, 
-                                     extended : HashMapWrapper<Edge, Edge>) -> bool {
-        pearlite! { 
-            forall<key : Edge> 
-                original@.get(key) != None ==> 
-                extended@.get(key) == original@.get(key)
         }
     }
     
@@ -944,12 +933,12 @@ impl Manager {
               })]
     #[ensures(forall<vars : _>
               manager_1.node_level_lt_env(*edge, vars)
-              &&
-              manager_2.node_level_lt_env(*edge, vars)
+              // &&
+              // manager_2.node_level_lt_env(*edge, vars)
               &&
               manager_1.node_store_coincides_env(vars)
-              &&
-              manager_2.node_store_coincides_env(vars)
+              // &&
+              // manager_2.node_store_coincides_env(vars)
 
               ==>
 
@@ -1328,11 +1317,11 @@ impl Manager {
     // Functional correctness
     // After apply_not, the semantics of every other node is preserved
     #[ensures(
-        forall<edge : Edge> 
-            edge.edge_invariant(&(*self)) && 
+        forall<edge : Edge>
+            edge.edge_invariant(&(*self)) &&
             edge.edge_invariant(&(^self)) ==>
             forall<vars : _> 
-            (*self).node_store_coincides_env(vars) 
+            (*self).node_store_coincides_env(vars)
             && 
             (^self).node_store_coincides_env(vars)
             &&
@@ -1341,14 +1330,8 @@ impl Manager {
             (^self).node_level_lt_env(edge, vars) 
             
             ==>
-
+            
             (*self).eval_logic(edge, vars) == (^self).eval_logic(edge, vars))]
-    #[variant(if !f.is_terminal_value() {
-                 Edge::LEAVES_LEVEL@ - self.get_node_logic(f).level@
-              } else {
-                 // {! f.points_to_inner_node() }
-                 0
-              })]
     // TODO: abstract this into a predicate
     #[ensures(
         match result { 
@@ -1366,50 +1349,13 @@ impl Manager {
                  (^self).eval_logic(e, vars) == !(^self).eval_logic(f, vars)),
 
             None => true})]
-    #[ensures(Manager::apply_not_cache_only_extended((*self).apply_not_cache, 
-                                                     (^self).apply_not_cache))]
-    #[ensures(
-        forall<key : Edge> 
-            (*self).apply_not_cache@.get(key) == None
-            &&
-            (^self).apply_not_cache@.get(key) != None ==>
-            key == f && (^self).apply_not_cache@.get(key) == result)]
-    // TODO: add new hypotheses, beyond apply_not_cache_only_extended, to verify 
-    // apply_not_cache_invariant: how to verify edge_invariant0 edge (final self)?
-    #[ensures(Seq::len((*self).node_store@) <= Seq::len((^self).node_store@))]
-    // TODO: lemma_node_store_is_prefix_same_value?
-    #[ensures(            
-        forall<key : Edge> 
-            match (^self).apply_not_cache@.get(key) {
-                Some(edge) => 
-                    edge.edge_invariant(&(^self))
-                    &&
-                    key.edge_invariant(&(^self))
-                    &&
-                // apply_not-related invariant
-                    (^self).node_or_leaf_level(edge) >= (^self).node_or_leaf_level(key)
-                    &&
-                // If something is cached in apply_not_cache, then it has
-                // already been reduced and cached in unique_table
-                    (edge.points_to_inner_node() ==> 
-                     (^self).unique_table@.get((^self).node_store@[edge.inner_node_index_logic()])
-                     == 
-                     Some(edge))
-                    &&
-                // Functional correctness
-                // node_store_invariant: pre-condition of eval_logic
-                    (forall<vars : _> 
-                     (^self).node_level_lt_env(key, vars)
-                     &&
-                     (^self).node_level_lt_env(edge, vars)
-                     &&
-                     (^self).node_store_coincides_env(vars)
-
-                     ==>
-
-                     (^self).eval_logic(edge, vars) == !(^self).eval_logic(key, vars)),
-                None => true})]
     #[ensures((^self).apply_not_cache_invariant())]
+    #[variant(if !f.is_terminal_value() {
+          Edge::LEAVES_LEVEL@ - self.get_node_logic(f).level@
+      } else {
+          // {! f.points_to_inner_node() }
+          0
+      })]
     pub fn apply_not(&mut self, f: Edge) -> Option<Edge> {
         let fnode = match f.terminal_value() {
             Some(t) => return Some(Edge::to_terminal(!t)),
@@ -1423,8 +1369,11 @@ impl Manager {
 
         let res;
         
-        
-        match (self.apply_not(fnode.t), self.apply_not(fnode.e)) {
+        let not_fnode_t = self.apply_not(fnode.t);
+
+        let not_fnode_e = self.apply_not(fnode.e);
+
+        match (not_fnode_t, not_fnode_e) {
             (Some(then_edge), Some(else_edge)) => {
                 // NOTE: do not remove this assertion, it is necessary to verify
                 // the same assertion, after call to reduce
@@ -1439,8 +1388,10 @@ impl Manager {
 
                               self.eval_logic(then_edge, vars) == !self.eval_logic(fnode.t, vars));
 
+                proof_assert!(self.apply_not_cache_invariant());
                 match self.reduce(fnode.level, then_edge, else_edge) {
                     Some(edge) => {
+                        proof_assert!(self.apply_not_cache_invariant());
                         // TODO: why apply_not_cache.insert(f, edge) invalidates 
                         // the assertions about eval_logic made after it?
                         proof_assert!(
@@ -1469,27 +1420,18 @@ impl Manager {
 
                         let self_old = snapshot! {self};
 
+                        proof_assert!(*self_old == self);
+                        
                         self.apply_not_cache.insert(f, edge);
 
+                        proof_assert!(forall<k : Edge> k != f ==> 
+                                      self_old.apply_not_cache@.get(k) == self.apply_not_cache@.get(k));
+                        
                         proof_assert!(self.node_store == (*self_old).node_store);
                         proof_assert!(self.node_store_invariant() && self_old.node_store_invariant());
 
                         proof_assert!(Manager::lemma_eval_logic_depends_on_node_store(self, *self_old);
                                       true);
-
-                        proof_assert!(then_edge != else_edge ==>
-                                      edge.points_to_inner_node() 
-                                      &&
-                                      self.node_store[edge.inner_node_index_logic()].level == fnode.level
-                                      &&
-                                      self.node_store[edge.inner_node_index_logic()].t == then_edge
-                                      &&
-                                      self.node_store[edge.inner_node_index_logic()].e == else_edge);
-
-                        proof_assert!(then_edge == else_edge ==>
-                                      edge == then_edge 
-                                      &&
-                                      edge == else_edge);
 
                         proof_assert!(Manager::lemma_node_store_is_prefix_same_value(*self, ^self, edge);
                                       true);
@@ -1521,32 +1463,6 @@ impl Manager {
                               ==>
 
                               self.eval_logic(else_edge, vars) == self_old.eval_logic(else_edge, vars));
-
-
-                        proof_assert!(
-                            forall<vars : _>
-                              (*self_old).node_level_lt_env(fnode.t, vars)
-                              &&
-                              (*self_old).node_level_lt_env(then_edge, vars)
-                              &&
-                              (*self_old).node_store_coincides_env(vars) 
-                              
-                              ==>
-
-                              (*self_old).eval_logic(then_edge, vars) == !(*self_old).eval_logic(fnode.t, vars));
-
-                        
-                        proof_assert!(
-                            forall<vars : _>
-                              (*self_old).node_level_lt_env(fnode.e, vars)
-                              &&
-                              (*self_old).node_level_lt_env(else_edge, vars)
-                              &&
-                              (*self_old).node_store_coincides_env(vars) 
-                              
-                              ==>
-
-                              (*self_old).eval_logic(else_edge, vars) == !(*self_old).eval_logic(fnode.e, vars));
 
                         proof_assert!(
                             forall<vars : _>
@@ -1596,17 +1512,51 @@ impl Manager {
 
                               self.eval_logic(edge, vars) == !self.eval_logic(f, vars));
 
-                        
                         proof_assert!(self.apply_not_cache@.get(f) == Some(edge));
+                        
+                        // TODO: lemma candidate
+                        proof_assert!(forall<manager_1 : Manager>
+                                      forall<manager_2 : Manager>
+                                      manager_1.node_store@ == manager_2.node_store@ ==>
+                                      forall<vars : _> 
+                                      forall<k : _>
+                                      manager_1.node_store_coincides_env(vars) ==>
+                                      manager_1.node_level_lt_env(k, vars) ==>
+                                      manager_2.node_store_coincides_env(vars) &&
+                                      manager_2.node_level_lt_env(k, vars));
+                        
+                        proof_assert!(forall<key : Edge> 
+                                      match self.apply_not_cache@.get(key) {
+                                          Some(edge) => 
+                                              (forall<vars : _> 
+                                               (self).node_level_lt_env(key, vars)
+                                               &&
+                                               (self).node_level_lt_env(edge, vars)
+                                               &&
+                                               (self).node_store_coincides_env(vars)
+
+                                               ==>
+
+                                               (self).eval_logic(edge, vars) == !(self).eval_logic(key, vars)),
+                                          None => true
+                                      });
+
+                        proof_assert!(self.apply_not_cache_invariant());
                         
                         res = Some(edge)
                     },
                     
-                    None => res = None
+                    None => {
+                        proof_assert!(self.apply_not_cache_invariant());
+                        res = None
+                    }
                 }
             },
 
-            _ => res = None
+            _ => {
+                proof_assert!(self.apply_not_cache_invariant());
+                res = None
+            }
         }
 
         res
